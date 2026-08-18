@@ -1,0 +1,709 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "P5EE3C7C4D8A7B3C9"
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 7,
+        "x": 9,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "# OpenRAN@Brasil - xApp - Nori",
+        "mode": "markdown"
+      },
+      "pluginVersion": "9.5.2",
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 3,
+      "panels": [],
+      "title": "Slice and UE metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "P5EE3C7C4D8A7B3C9"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 3
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "P5EE3C7C4D8A7B3C9"
+          },
+          "query": "from(bucket: \"openranbr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"ue_metrics\")\n  |> filter(fn: (r) => r[\"ueId\"] == \"00001\" or r[\"ueId\"] == \"00002\" or r[\"ueId\"] == \"00003\" or r[\"ueId\"] == \"00004\")\n  |> filter(fn: (r) => r[\"_field\"] == \"DRB.PdcpSduBitRateDl.UEID\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Number of UEs per slice",
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_1",
+            "mode": "reduceRow",
+            "reduce": {
+              "include": [
+                "DRB.PdcpSduBitRateDl.UEID {name=\"ue_metrics\", ueId=\"00001\"}",
+                "DRB.PdcpSduBitRateDl.UEID {name=\"ue_metrics\", ueId=\"00002\"}"
+              ],
+              "reducer": "count"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_2",
+            "mode": "reduceRow",
+            "reduce": {
+              "include": [
+                "DRB.PdcpSduBitRateDl.UEID {name=\"ue_metrics\", ueId=\"00003\"}",
+                "DRB.PdcpSduBitRateDl.UEID {name=\"ue_metrics\", ueId=\"00004\"}"
+              ],
+              "reducer": "count"
+            }
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "Time",
+                "slice_1",
+                "slice_2"
+              ]
+            }
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "P5EE3C7C4D8A7B3C9"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "Kbits"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 3
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "P5EE3C7C4D8A7B3C9"
+          },
+          "query": "from(bucket: \"openranbr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"ue_metrics\")\n  |> filter(fn: (r) => r[\"ueId\"] == \"00002\" or r[\"ueId\"] == \"00001\" or r[\"ueId\"] == \"00003\" or r[\"ueId\"] == \"00004\")\n  |> filter(fn: (r) => r[\"_field\"] == \"QosFlow.PdcpPduVolumeDL_Filter.UEID\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Average slice throughput",
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_1_sum",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00001\"}",
+              "reducer": "sum",
+              "right": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00002\"}"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_1_sum_period",
+            "binary": {
+              "left": "slice_1_sum",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_1",
+            "binary": {
+              "left": "slice_1_sum_period",
+              "operator": "/",
+              "reducer": "sum",
+              "right": "2"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_2_sum",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00003\"}",
+              "reducer": "sum",
+              "right": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00004\"}"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_2_sum_period",
+            "binary": {
+              "left": "slice_2_sum",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "slice_2",
+            "binary": {
+              "left": "slice_2_sum_period",
+              "operator": "/",
+              "reducer": "sum",
+              "right": "2"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "Time",
+                "slice_1",
+                "slice_2"
+              ]
+            }
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "P5EE3C7C4D8A7B3C9"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "Mbits"
+        },
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "DRB.PdcpSduBitRateDl.UEID 00001"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "P5EE3C7C4D8A7B3C9"
+          },
+          "query": "from(bucket: \"openranbr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"ue_metrics\")\n  |> filter(fn: (r) => r[\"ueId\"] == \"00001\" or r[\"ueId\"] == \"00002\" or r[\"ueId\"] == \"00003\" or r[\"ueId\"] == \"00004\")\n  |> filter(fn: (r) => r[\"_field\"] == \"DRB.PdcpSduBitRateDl.UEID\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Average requested throughput",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "P5EE3C7C4D8A7B3C9"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "Kbits"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "P5EE3C7C4D8A7B3C9"
+          },
+          "query": "from(bucket: \"openranbr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"ue_metrics\")\n  |> filter(fn: (r) => r[\"ueId\"] == \"00002\" or r[\"ueId\"] == \"00001\" or r[\"ueId\"] == \"00003\" or r[\"ueId\"] == \"00004\")\n  |> filter(fn: (r) => r[\"_field\"] == \"QosFlow.PdcpPduVolumeDL_Filter.UEID\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Average throughput per UE",
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "UE 00001",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00001\"}",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "UE 00002",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00002\"}",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "UE 00003",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00003\"}",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "alias": "UE 00004",
+            "binary": {
+              "left": "QosFlow.PdcpPduVolumeDL_Filter.UEID {name=\"ue_metrics\", ueId=\"00004\"}",
+              "operator": "*",
+              "reducer": "sum",
+              "right": "50"
+            },
+            "mode": "binary",
+            "reduce": {
+              "reducer": "sum"
+            }
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "Time",
+                "UE 00001",
+                "UE 00002",
+                "UE 00003",
+                "UE 00004"
+              ]
+            }
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 2,
+      "panels": [],
+      "title": "Cell metrics",
+      "type": "row"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-10s",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "openran-br",
+  "uid": "cbf6eff3-29d0-4d70-9580-cba555799e98",
+  "version": 2,
+  "weekStart": ""
+}
