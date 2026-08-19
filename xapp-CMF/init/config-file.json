@@ -1,0 +1,55 @@
+{
+    "name": "xappcmf",
+    "version": "1.0.0",
+    "containers": [
+        {
+            "name": "xappcmfcontainer",
+            "image": {
+                "registry": "127.0.0.1:5001",
+                "name": "xappcmf",
+                "tag": "1.0.0"
+            }
+        }
+    ],
+    "messaging": {
+        "ports": [
+            {
+                "name": "http",
+                "container": "xappcmfcontainer",
+                "port": 8080,
+                "description": "http service (KPM/subscription plumbing, and /ric/v1/cmf/evaluate used by MRO/MLB)"
+            },
+            {
+                "name": "rmrroute",
+                "container": "xappcmfcontainer",
+                "port": 4561,
+                "description": "rmr route port for bouncer xapp"
+            },
+            {
+                "name": "rmrdata",
+                "container": "xappcmfcontainer",
+                "port": 4560,
+                "rxMessages": ["RIC_SUB_RESP","RIC_SUB_DEL_RESP", "RIC_INDICATION"],
+                "txMessages": ["RIC_SUB_REQ","RIC_SUB_DEL_REQ"],
+                "policies": [1],
+                "description": "rmr data port. Note: this xApp never sends RIC_CONTROL_REQ - it only ever evaluates a proposal over HTTP (/ric/v1/cmf/evaluate); MRO/MLB are the ones that talk to e2term."
+            }
+        ]
+    },
+    "readinessProbe": {
+        "httpGet": {
+            "path": "ric/v1/health/ready",
+            "port": 8080
+        },
+        "initialDelaySeconds": 5,
+        "periodSeconds": 15
+    },
+    "livenessProbe": {
+        "httpGet": {
+            "path": "ric/v1/health/alive",
+            "port": 8080
+        },
+        "initialDelaySeconds": 5,
+        "periodSeconds": 15
+    }
+}

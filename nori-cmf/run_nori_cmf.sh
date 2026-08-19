@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# Executa o exemplo nori-cmf (Conflict Mitigation Framework: xApps MRO/MLB + CMF).
+# Executa o exemplo nori-cmf (cenário de rede: 19 células + 380 UEs + E2).
+#
+# Este exemplo NÃO implementa mais o Conflict Mitigation Framework — ele só
+# simula a RAN e aplica, sem arbitrar, qualquer decisão de controle recebida
+# (do xApp-MRO/xApp-MLB reais via E2, ou da emulação interna quando --useE2=0).
+# O CMF (CD Agent, CR Agent, PMon) roda como um xApp separado: veja xapp-CMF.
 #
 # Uso:
-#   ./run_nori_cmf.sh                              # offline, modo "none", 1000 s
-#   ./run_nori_cmf.sh --cm-mode prioMRO             # offline, MRO tem prioridade nos conflitos
-#   ./run_nori_cmf.sh --all-modes                   # roda none, prioMRO e prioMLB em sequência
+#   ./run_nori_cmf.sh                              # offline, 1000 s, emulação interna de MRO/MLB
 #   ./run_nori_cmf.sh --use-e2                      # conecta ao Near-RT RIC via E2 (kubectl)
 #   ./run_nori_cmf.sh --sim-time 200 --warmup-time 50 --output-dir /tmp/cmf-teste
 #
@@ -16,20 +19,14 @@ set -e
 DEPLOYMENT_NAME="deployment-ricplt-e2term-alpha"
 NAMESPACE="ricplt"
 
-CM_MODE="none"
 SIM_TIME="1000"
 WARMUP_TIME="150"
 OUTPUT_DIR="nori-cmf-output"
 USE_E2=0
-ALL_MODES=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --cm-mode)
-            CM_MODE="$2"
-            shift 2
-            ;;
         --sim-time)
             SIM_TIME="$2"
             shift 2
@@ -44,10 +41,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --use-e2)
             USE_E2=1
-            shift
-            ;;
-        --all-modes)
-            ALL_MODES=1
             shift
             ;;
         *)
@@ -76,17 +69,5 @@ else
     IP_ARG=(--useE2=0)
 fi
 
-run_one() {
-    local mode="$1"
-    local outDir="$2"
-    echo "==> nori-cmf: cmMode=${mode} simTime=${SIM_TIME}s warmupTime=${WARMUP_TIME}s outputDir=${outDir}"
-    ./ns3 run "nori-cmf ${IP_ARG[*]} --cmMode=${mode} --simTime=${SIM_TIME} --warmupTime=${WARMUP_TIME} --outputDir=${outDir} ${EXTRA_ARGS[*]}"
-}
-
-if [[ "$ALL_MODES" -eq 1 ]]; then
-    for mode in none prioMRO prioMLB; do
-        run_one "$mode" "${OUTPUT_DIR}/${mode}"
-    done
-else
-    run_one "$CM_MODE" "$OUTPUT_DIR"
-fi
+echo "==> nori-cmf: simTime=${SIM_TIME}s warmupTime=${WARMUP_TIME}s outputDir=${OUTPUT_DIR}"
+./ns3 run "nori-cmf ${IP_ARG[*]} --simTime=${SIM_TIME} --warmupTime=${WARMUP_TIME} --outputDir=${OUTPUT_DIR} ${EXTRA_ARGS[*]}"

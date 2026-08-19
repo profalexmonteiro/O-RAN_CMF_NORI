@@ -78,6 +78,14 @@ MRO_REQUESTOR_ID = 1004
 # control requests every reporting period.
 DECISION_EPSILON = 1e-6
 
+# The Conflict Mitigation Framework xApp (see xapp-CMF): every decision below
+# is submitted here *before* being sent to the RAN, and only proceeds if
+# allowed. A short timeout with fail-open behaviour keeps a missing/crashed
+# CMF from silently blocking every control decision forever - it just
+# degrades to "no conflict mitigation" instead.
+CMF_EVALUATE_URL = "http://service-ricxapp-xappcmf-http.ricxapp:8080/ric/v1/cmf/evaluate"
+CMF_TIMEOUT_S = 2
+
 
 class XappMro:
     """
@@ -489,14 +497,57 @@ class XappMro:
         if not decisions:
             return
 
+        cell_id = _parse_cell_id(cell_object_id)
+        approved = self._filter_through_cmf(cell_id, decisions)
+        if not approved:
+            return
+
         self.logger.info(
             f"Cell {cell_object_id}: ho={ho_total} pp_ratio={pp_ratio:.1%} "
             f"rlf_ratio={rlf_ratio:.1%} -> hysteresis={new_hyst}dB ttt={new_ttt}s "
             f"(was hysteresis={current_hyst} ttt={current_ttt})"
         )
 
-        coded_pdu = self.build_ric_control_pdu(decisions)
+        coded_pdu = self.build_ric_control_pdu(approved)
         rmrxapp.rmr_rts(sbuf, new_payload=coded_pdu, new_mtype=12040)  # RIC Control Request
+
+    def _filter_through_cmf(
+        self, cell_id: Optional[int], decisions: List[Tuple[int, float]]
+    ) -> List[Tuple[int, float]]:
+        """
+        Submits every (parameter_id, value) decision to the CMF xApp's
+        /ric/v1/cmf/evaluate and keeps only the ones it allows. If cell_id
+        could not be parsed, decisions are let through unfiltered (there is
+        nothing to key the CMF's database on).
+        """
+        if cell_id is None:
+            return decisions
+
+        approved: List[Tuple[int, float]] = []
+        for parameter_id, value in decisions:
+            try:
+                resp = requests.post(
+                    CMF_EVALUATE_URL,
+                    json={
+                        "source": "MRO",
+                        "cellId": cell_id,
+                        "parameterId": parameter_id,
+                        "value": value,
+                    },
+                    timeout=CMF_TIMEOUT_S,
+                )
+                allowed = resp.status_code == 200 and bool(resp.json().get("allowed", True))
+                if resp.status_code == 200 and not allowed:
+                    self.logger.info(
+                        f"Cell {cell_id}: CMF rejected parameter {parameter_id}={value} "
+                        f"({resp.json().get('reason', 'no reason given')})"
+                    )
+            except requests.exceptions.RequestException as exc:
+                self.logger.warning(f"CMF unreachable ({exc}), allowing by default")
+                allowed = True
+            if allowed:
+                approved.append((parameter_id, value))
+        return approved
 
     def build_ric_control_pdu(self, decisions: List[Tuple[int, float]]) -> bytes:
         """
@@ -793,3 +844,11 @@ class XappMro:
                 }
             ],
         }
+
+
+def _parse_cell_id(cell_object_id: str) -> Optional[int]:
+    # nori-cmf.cc names cells "NRCellDU_<id>".
+    try:
+        return int(cell_object_id.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None

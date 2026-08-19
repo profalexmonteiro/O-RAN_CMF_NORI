@@ -1,0 +1,1956 @@
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/init/config-file.json xapp-CMF/init/config-file.json
+--- xapp-nori/init/config-file.json	2025-05-15 18:13:52.367470228 +0000
++++ xapp-CMF/init/config-file.json	2026-08-19 15:22:35.436473162 +0000
+@@ -1,12 +1,12 @@
+ {
+-    "name": "xappnori",
++    "name": "xappcmf",
+     "version": "1.0.0",
+     "containers": [
+         {
+-            "name": "xappnoricontainer",
++            "name": "xappcmfcontainer",
+             "image": {
+                 "registry": "127.0.0.1:5001",
+-                "name": "xappnori",
++                "name": "xappcmf",
+                 "tag": "1.0.0"
+             }
+         }
+@@ -15,24 +15,24 @@
+         "ports": [
+             {
+                 "name": "http",
+-                "container": "xappnoricontainer",
++                "container": "xappcmfcontainer",
+                 "port": 8080,
+-                "description": "http service"
++                "description": "http service (KPM/subscription plumbing, and /ric/v1/cmf/evaluate used by MRO/MLB)"
+             },
+             {
+                 "name": "rmrroute",
+-                "container": "xappnoricontainer",
++                "container": "xappcmfcontainer",
+                 "port": 4561,
+                 "description": "rmr route port for bouncer xapp"
+             },
+             {
+                 "name": "rmrdata",
+-                "container": "xappnoricontainer",
++                "container": "xappcmfcontainer",
+                 "port": 4560,
+-                "rxMessages": ["RIC_SUB_RESP","RIC_SUB_DEL_RESP", "RIC_INDICATION", "TS_UE_LIST"],
+-                "txMessages": ["RIC_SUB_REQ","RIC_SUB_DEL_REQ", "RIC_CONTROL_REQ", "TS_QOE_PRED_REQ"],
++                "rxMessages": ["RIC_SUB_RESP","RIC_SUB_DEL_RESP", "RIC_INDICATION"],
++                "txMessages": ["RIC_SUB_REQ","RIC_SUB_DEL_REQ"],
+                 "policies": [1],
+-                "description": "rmr data port"
++                "description": "rmr data port. Note: this xApp never sends RIC_CONTROL_REQ - it only ever evaluates a proposal over HTTP (/ric/v1/cmf/evaluate); MRO/MLB are the ones that talk to e2term."
+             }
+         ]
+     },
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/log_xapp.sh xapp-CMF/log_xapp.sh
+--- xapp-nori/log_xapp.sh	2025-05-15 18:13:52.367470228 +0000
++++ xapp-CMF/log_xapp.sh	2026-08-19 15:23:12.085082770 +0000
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappcmf"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/README.md xapp-CMF/README.md
+--- xapp-nori/README.md	2025-05-15 18:13:52.367470228 +0000
++++ xapp-CMF/README.md	2026-08-19 15:26:14.620142488 +0000
+@@ -1,51 +1,75 @@
+-# xapp-nori
+-The xApp-NORI is an OSC xApp for interacting with gNBs simulated by the NORI NS-3 module.
++# xapp-CMF
+ 
+-This xApp sends a subscription request for the RAN Function ID 200 to all E2 nodes registered at the Near-RT RIC. The E2 Nodes should then start sending RIC Indication messages containing information about the RAN. The xApp responds to each message with a XXXXXXXXXXXX message.
++The xApp-CMF is an OSC xApp implementing the **Conflict Mitigation Framework (CMF)** proposed by Adamczyk & Kliks in *"Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"* (IEEE ComMag 2023, [arXiv:2305.07117](https://arxiv.org/abs/2305.07117)), as a standalone xApp on the Near-RT RIC — matching where the paper itself places it, rather than embedding it in the [`nori-cmf.cc`](../ns-3-dev/contrib/nori/examples/nori-cmf.cc) ns-3 scenario.
+ 
+-All commands assume:
+-- You are running an [OpenRAN@Brasil Blueprint v1](https://github.com/LABORA-INF-UFG/openran-br-blueprint/wiki/OpenRAN@Brasil-Blueprint-v1) VM
+-- NORI is already installed, configured, running and registered at the Near-RT RIC
+-- You are inside the repository folder `xapp-nori/`
++It is the third xApp of this project, alongside [`xapp-MRO`](../xapp-MRO) and [`xapp-MLB`](../xapp-MLB): those two propose handover-boundary changes, and this one is what decides whether a proposal that conflicts with another xApp's decision is actually allowed to reach the RAN.
+ 
+-## How to use
++## Why a separate xApp
+ 
+-Install the xApp:
++`nori-cmf.cc` used to include its own conflict detection/mitigation logic, directly inside the ns-3 process. That is not how the reference paper defines the CMF: it is explicitly a component of the Near-RT RIC's Conflict Mitigation (CM) entity (Fig. 2 of the paper), independent of any particular RAN or E2 node implementation, and meant to mitigate conflicts between **any** xApps deployed on that RIC — not just the ones a given simulator happens to know about. `nori-cmf.cc` is now *only* the RAN + E2 node scenario: it applies whatever RIC Control Request it receives, from whichever xApp sent it, with no arbitration of its own. All conflict detection and resolution logic now lives here.
+ 
+-```bash
+-bash update_xapp.sh
+-```
++## The three components
+ 
+-Get the xApp logs:
++Following Section III of the paper exactly:
+ 
+-```bash
+-bash log_xapp.sh
+-```
++| Module | File | Role |
++|---|---|---|
++| **CD Agent** (Conflict Detection) | [`src/cd_agent.py`](src/cd_agent.py) | Implements **DCD** (Direct Conflict Detection) and **ICD** (Indirect Conflict Detection). Both are *pre-action*: every proposed decision is checked against a database of currently-in-effect decisions before it is allowed to take effect. |
++| **CR Agent** (Conflict Resolution) | [`src/cr_agent.py`](src/cr_agent.py) | Decides, for a proposal the CD Agent flagged as conflicting, whether it is allowed. Implements the same simple prioritization scheme the paper evaluates: `none` (detect only), `prioMRO`, `prioMLB`. |
++| **PMon** (Performance Monitoring) | [`src/pmon.py`](src/pmon.py) | Feeds **ImCD** (Implicit Conflict Detection), which is inherently *post-action*: it watches a RAN KPI (mean UE satisfaction per cell) and, when it drops significantly, correlates the drop against the CD Agent's own record of which xApps recently touched that cell. |
+ 
+-If you want to test how NORI handles deleting subscriptions and accepting new ones:
++### DCD — Direct Conflict Detection
+ 
+-```bash
+-bash resubscribe.sh
+-```
++Two xApps writing the **same parameter** of the same cell with different values. In the current deployment (only MRO and MLB, writing disjoint parameters) this should not occur — it is implemented for completeness and as the fail-safe the paper describes it as ("in case of human error leading to deployment of directly conflicting xApps"), and will trigger correctly if a second xApp ever targets `HOHysteresis`, `HOTimeToTrigger` or `HOMeasurementOffset`.
+ 
+-Uninstall the xApp:
++### ICD — Indirect Conflict Detection
+ 
+-```bash
+-dms_cli uninstall xappnori ricxapp
+-```
++Two xApps writing **different parameters of the same functional group**. `HOMeasurementOffset` (CIO), `HOHysteresis` and `HOTimeToTrigger` are all registered under the group `CellAffectHandoverBoundary` (see `PARAMETER_GROUPS` in `cd_agent.py`) because together they decide when a handover fires. This is the conflict type that structurally occurs between MRO and MLB in this deployment, and the one exercised on essentially every control round both are active.
++
++### ImCD — Implicit Conflict Detection
+ 
+-## Troubleshoot
++Cannot prevent a conflicting decision from taking effect — by the time it is detected, it already has. PMon tracks `QoS.MeanUeSatisfactionPermille` per cell (reported by `nori-cmf.cc` in every KPM indication); a relative drop past a threshold is checked against the CD Agent's database for that cell, and if more than one xApp had a decision in effect there, a correlated-occurrence counter is incremented. Only after a few correlated occurrences (not a single noisy sample) is the implicit conflict actually reported.
+ 
+-If the xApp says no gNBs are registered, try redeploying the Near-RT RIC:
++## How MRO and MLB talk to this xApp
++
++There is no practical way to have this xApp transparently intercept a `RIC_CONTROL_REQ` RMR message addressed to `e2term`: MRO and MLB target a *specific* E2 node/cell by replying (`rmr_rts`) along the same connection their KPM indication arrived on, and that reply-route is only usable by the process that received the original message — a third process cannot forward it on their behalf without losing the routing context.
++
++Instead, this xApp exposes a synchronous HTTP endpoint, and MRO/MLB call it **before** ever building or sending a RIC Control Request:
+ 
+-```bash
+-bash redeploy_ric.sh
+ ```
++POST /ric/v1/cmf/evaluate
++{"source": "MRO" | "MLB", "cellId": <int>, "parameterId": 1 | 2 | 3, "value": <float>}
++
++-> 200 {"allowed": true}
++-> 200 {"allowed": false, "reason": "ICD indirect conflict with MLB's 'HOMeasurementOffset'=3.0 on cell 12 (prioritized: MLB)"}
++```
++
++`parameterId` follows the same convention already decoded by `RicControlCallback()` in `nori-cmf.cc`: `1` = `HOMeasurementOffset` (CIO), `2` = `HOHysteresis`, `3` = `HOTimeToTrigger`. If a proposal is rejected, MRO/MLB simply do not send that parameter's RIC Control Request this round — exactly as if the CMF had silently dropped it, matching the old embedded behaviour, except the decision is now blocked **before** ever reaching the RAN, not after.
+ 
+-Then, wait for all `ricplt` pods to be ready (with `1/1` or `2/2` on the `READY` column). You can check this with:
++This call has a short timeout and **fails open**: if the CMF xApp is unreachable (not deployed, still starting, or crashed), MRO/MLB proceed as if conflict mitigation were disabled, rather than freezing RAN control entirely on a missing dependency. A warning is logged every time this happens.
+ 
+-```bash
+-watch kubectl get pods -n ricplt
++Independently of the evaluate endpoint, this xApp also subscribes to KPM (RAN Function 200) on every registered E2 node, purely to feed PMon — it never writes any RAN parameter itself.
++
++## Configuring the resolution mode
++
++Set in `src/custom_xapp.py`:
++
++```python
++CM_MODE = CrMode.PRIO_MRO  # or CrMode.PRIO_MLB, or CrMode.NONE
+ ```
+ 
+-After the Near-RT RIC is ready, you can start NORI. Still, sometimes the gNBs do not register. This can happen because some Near-RT RIC components are still executing starting routines. As a workaround, stop and restart NORI again until it registers.
+\ No newline at end of file
++matching the three modes the paper's own evaluation compares (`CMF disabled`, `prioritize MRO`, `prioritize MLB`).
++
++## Requirements
++
++Same as [`xapp-MRO`](../xapp-MRO/README.md#requirements) and [`xapp-MLB`](../xapp-MLB/README.md#requirements) — an OpenRAN@Brasil Blueprint VM with a healthy Near-RT RIC and a local registry at `127.0.0.1:5001`.
++
++## Deploying to the Near-RT RIC
++
++Follow the same step-by-step as [`xapp-MRO`'s README](../xapp-MRO/README.md#deploying-to-the-near-rt-ric-step-by-step) (build/install via `bash update_xapp.sh`, confirm the pod, resubscribe once `nori-cmf` is connected), replacing every `xappmro` with `xappcmf`. **Deploy this xApp before, or at the same time as, MRO/MLB** — while it is missing, MRO/MLB still work (fail-open), but no conflict is ever actually mitigated, only whatever the individual xApp decided on its own.
++
++## Observability
++
++- `kubectl logs` shows one line per evaluated proposal that resulted in a conflict, e.g. `Cell 12: MLB proposes HOMeasurementOffset=3.0 -> REJECTED (ICD indirect conflict with MRO's 'HOHysteresis'=1.5 on cell 12 (prioritized: MRO))`.
++- Every detected conflict (DCD, ICD or ImCD) is appended as one JSON line to `/tmp/conflicts.json` inside the pod, in the same message shape as `json_messages/{DCD,ICD,ImCD}/*signal conflict.json` in the reference repository ([`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023)).
++- If `self.save_influx = True` (the default), every evaluation is written to InfluxDB in measurement `cmf_evaluations` (`cellId`, `source`, `parameter`, `value`, `conflicts`, `allowed`), and every implicit conflict in `cmf_conflicts`.
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/resubscribe.sh xapp-CMF/resubscribe.sh
+--- xapp-nori/resubscribe.sh	2025-05-15 18:13:52.367470228 +0000
++++ xapp-CMF/resubscribe.sh	2026-08-19 15:23:05.688976254 +0000
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappcmf"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/setup.py xapp-CMF/setup.py
+--- xapp-nori/setup.py	2025-05-15 18:13:52.367470228 +0000
++++ xapp-CMF/setup.py	2026-08-19 15:22:24.384289679 +0000
+@@ -24,12 +24,12 @@
+ 
+ 
+ setup(
+-    name='xappnori',
++    name='xappcmf',
+     version='0.0.1',
+     packages=find_packages(),
+     url='https://github.com/LABORA-INF-UFG/xapp-nori/',
+     license='Apache 2.0',
+-    description="xApp for interacting with NORI",
++    description="Conflict Mitigation Framework (CD Agent / CR Agent / PMon) xApp for NORI/nori-cmf",
+     author='Daniel Campos',
+     author_email='danielcampossilva@inf.ufg.br',
+     python_requires='>=3.8',
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/cd_agent.py xapp-CMF/src/cd_agent.py
+--- xapp-nori/src/cd_agent.py	1970-01-01 00:00:00.000000000 +0000
++++ xapp-CMF/src/cd_agent.py	2026-08-19 15:18:15.796216514 +0000
+@@ -0,0 +1,126 @@
++# Conflict Detection (CD) Agent.
++#
++# Implements the Direct Conflict Detection (DCD) and Indirect Conflict
++# Detection (ICD) components described in Section III-B/III-C of
++# "Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"
++# (Adamczyk & Kliks, IEEE ComMag 2023, https://arxiv.org/abs/2305.07117).
++#
++# Both work "pre-action": every proposed RAN control message is evaluated
++# against the Near-RT RIC's Database of currently-in-effect control decisions
++# *before* it is allowed to reach the RAN, so a real conflict can be
++# prevented rather than just observed after the fact. Implicit Conflict
++# Detection (ImCD) cannot work this way (see pmon.py) and lives separately.
++
++import time
++from dataclasses import dataclass, field
++from typing import Dict, List, Optional
++
++# RAN parameter IDs and their O-RAN names, matching the convention decoded by
++# RicControlCallback() in nori-cmf.cc.
++PARAMETER_NAMES = {
++    1: "HOMeasurementOffset",  # CIO, written by MLB
++    2: "HOHysteresis",  # written by MRO
++    3: "HOTimeToTrigger",  # written by MRO
++}
++
++# Parameter Groups (PGs), configured here the same way the paper describes
++# ("can be configured manually by the MNO, predefined in the standards, or
++# learned dynamically"): CIO, Hysteresis and TTT all influence where the
++# handover boundary of a cell sits, so a change to any of them can offset a
++# change to any other.
++PARAMETER_GROUPS = {
++    "CellAffectHandoverBoundary": {1, 2, 3},
++}
++
++
++def group_of(parameter_id: int) -> Optional[str]:
++    for name, members in PARAMETER_GROUPS.items():
++        if parameter_id in members:
++            return name
++    return None
++
++
++@dataclass
++class ControlRecord:
++    """
++    One entry of the Near-RT RIC's "Recently changed parameters" /
++    "Recently changed Parameter Groups" database (Fig. 2 of the paper).
++    """
++
++    source: str  # originating xApp ("MRO" or "MLB")
++    cell_id: int  # control target
++    parameter_id: int
++    value: float
++    timestamp: float  # wall-clock time.time() the decision was logged
++    control_timespan_s: float = 0.5  # how long the decision stays "in effect"
++
++    def expired(self, now: float) -> bool:
++        return now - self.timestamp > self.control_timespan_s
++
++    def parameter_name(self) -> str:
++        return PARAMETER_NAMES.get(self.parameter_id, "Unknown")
++
++
++@dataclass
++class Conflict:
++    conflict_type: str  # "direct" | "indirect"
++    detector: str  # "DCD" | "ICD"
++    group_name: Optional[str]
++    proposal: ControlRecord
++    existing: ControlRecord
++
++
++class ConflictDetectionAgent:
++    """
++    Tracks, per cell, every control decision currently in effect and detects
++    direct and indirect conflicts against a newly proposed one.
++    """
++
++    def __init__(self):
++        # "Database" / SDL stand-in: cell_id -> list of currently-in-effect records.
++        self._records: Dict[int, List[ControlRecord]] = {}
++
++    def _prune(self, cell_id: int, now: float) -> None:
++        records = self._records.get(cell_id, [])
++        self._records[cell_id] = [r for r in records if not r.expired(now)]
++
++    def active_records(self, cell_id: int, now: Optional[float] = None) -> List[ControlRecord]:
++        """Returns the currently valid (non-expired) records for a cell."""
++        now = time.time() if now is None else now
++        self._prune(cell_id, now)
++        return list(self._records.get(cell_id, []))
++
++    def evaluate(self, proposal: ControlRecord) -> List[Conflict]:
++        """
++        DCD + ICD: compares `proposal` against every other xApp's currently
++        active decision on the same cell. Returns every conflict found (there
++        can be more than one, e.g. against two different existing records).
++        The proposal is recorded into the database regardless of the outcome
++        -so later proposals can be checked against it too- matching the
++        paper's DCD2 "store data about control message" step, which happens
++        unconditionally, before the comparison.
++        """
++        now = proposal.timestamp
++        existing = self.active_records(proposal.cell_id, now)
++
++        conflicts: List[Conflict] = []
++        proposal_group = group_of(proposal.parameter_id)
++        for record in existing:
++            if record.source == proposal.source:
++                continue  # a conflict is between *different* xApps
++
++            if record.parameter_id == proposal.parameter_id:
++                # DCD: same parameter of the same cell, contradicting values.
++                conflicts.append(
++                    Conflict("direct", "DCD", None, proposal, record)
++                )
++            else:
++                record_group = group_of(record.parameter_id)
++                if proposal_group is not None and proposal_group == record_group:
++                    # ICD: different parameters of the same functional group.
++                    conflicts.append(
++                        Conflict("indirect", "ICD", proposal_group, proposal, record)
++                    )
++
++        self._records.setdefault(proposal.cell_id, []).append(proposal)
++        return conflicts
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/cr_agent.py xapp-CMF/src/cr_agent.py
+--- xapp-nori/src/cr_agent.py	1970-01-01 00:00:00.000000000 +0000
++++ xapp-CMF/src/cr_agent.py	2026-08-19 15:20:27.970368364 +0000
+@@ -0,0 +1,73 @@
++# Conflict Resolution (CR) Agent.
++#
++# Implements the resolution half of the framework described in
++# "Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"
++# (Adamczyk & Kliks, IEEE ComMag 2023). The paper leaves the CR Agent's exact
++# resolution logic open ("it is assumed that it can resolve any conflicts
++# detected by the CD Agent") and evaluates, in its simulation, the simplest
++# possible scheme: static xApp prioritization. That is what is implemented
++# here, matching the three modes the paper's own evaluation compares
++# ("CMF disabled", "prioritize MRO", "prioritize MLB").
++
++from enum import Enum
++from typing import List, Optional
++
++from .cd_agent import Conflict
++
++
++class CrMode(str, Enum):
++    NONE = "none"  # conflicts are only logged, never mitigated
++    PRIO_MRO = "prioMRO"  # MRO's decisions always take effect
++    PRIO_MLB = "prioMLB"  # MLB's decisions always take effect
++
++
++class Resolution:
++    def __init__(self, allowed: bool, reason: Optional[str] = None):
++        self.allowed = allowed
++        self.reason = reason
++
++
++class ConflictResolutionAgent:
++    """
++    Decides, for a proposal that the CD Agent flagged as conflicting with one
++    or more currently active decisions, whether it is allowed to take effect.
++    """
++
++    def __init__(self, mode: CrMode = CrMode.NONE):
++        self.mode = mode
++
++    def resolve(self, conflicts: List[Conflict]) -> Resolution:
++        if not conflicts:
++            return Resolution(allowed=True)
++
++        if self.mode == CrMode.NONE:
++            # "If a given xApp is prioritized..." - with none prioritized,
++            # every decision takes effect in the order it is provided; the
++            # conflict is only reported for the record.
++            return Resolution(allowed=True)
++
++        prioritized = "MRO" if self.mode == CrMode.PRIO_MRO else "MLB"
++
++        proposal_source = conflicts[0].proposal.source
++        if proposal_source == prioritized:
++            # The proposal itself is from the prioritized xApp: it always
++            # takes effect, regardless of what it conflicts with.
++            return Resolution(allowed=True)
++
++        if any(c.existing.source == prioritized for c in conflicts):
++            # The proposal conflicts with a decision from the prioritized
++            # xApp still in effect: the proposal is rejected.
++            c = next(c for c in conflicts if c.existing.source == prioritized)
++            return Resolution(
++                allowed=False,
++                reason=(
++                    f"{c.detector} {c.conflict_type} conflict with {prioritized}'s "
++                    f"'{c.existing.parameter_name()}'={c.existing.value} on cell "
++                    f"{c.proposal.cell_id} (prioritized: {prioritized})"
++                ),
++            )
++
++        # Conflicts with a third, non-prioritized source (not expected with
++        # only MRO/MLB deployed, but handled defensively): allow by default
++        # rather than blocking RAN control on an unrecognised source.
++        return Resolution(allowed=True)
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/custom_xapp.py xapp-CMF/src/custom_xapp.py
+--- xapp-nori/src/custom_xapp.py	2025-05-15 18:13:52.371470225 +0000
++++ xapp-CMF/src/custom_xapp.py	2026-08-19 15:20:47.118682875 +0000
+@@ -1,6 +1,9 @@
+ # Imports form local libraries
+ from .asn1_defs.e2sm_kpm_rc import E2SM_KPM_RC
+ from .asn1_defs.e2ap_2_3 import E2AP_PDU_Descriptions
++from .cd_agent import ConflictDetectionAgent, ControlRecord
++from .cr_agent import ConflictResolutionAgent, CrMode
++from .pmon import PerformanceMonitor
+ 
+ # Imports from OSC libraries
+ from ricxappframe.xapp_frame import RMRXapp, rmr
+@@ -9,85 +12,99 @@
+ from ricxappframe.entities.rnib.nb_identity_pb2 import NbIdentity
+ 
+ # Imports from other libraries
+-from time import sleep
+ from threading import Thread
+ import signal
+ import json
++import time
+ import requests
+-import numpy as np
+-from typing import Dict
+-from .env import MobNet, server_rl
+-import csv
+-from pathlib import Path
+-from influxdb_client import InfluxDBClient, Point, WritePrecision
++from typing import Dict, Set
+ import datetime
+-from ray import tune
+-from ray.rllib.algorithms.algorithm import Algorithm
+-from ray.rllib.env.policy_client import PolicyClient
++from influxdb_client import InfluxDBClient, Point, WritePrecision
+ 
+ 
+-class XappNori:
++class XappCmf:
+     """
+-    Custom xApp class.
++    Conflict Mitigation Framework (CMF) xApp for the NORI ns-3 module,
++    implementing the framework of Adamczyk & Kliks, "Conflict Mitigation
++    Framework and Conflict Detection in O-RAN Near-RT RIC" (IEEE ComMag 2023,
++    https://arxiv.org/abs/2305.07117), as a standalone xApp on the Near-RT
++    RIC rather than embedded in the ns-3 scenario.
++
++    It is made of the three components the paper places in the Near-RT RIC's
++    Conflict Mitigation (CM) entity:
++      - the Conflict Detection (CD) Agent (cd_agent.py), implementing Direct
++        (DCD) and Indirect (ICD) Conflict Detection, both pre-action;
++      - the Conflict Resolution (CR) Agent (cr_agent.py), which decides
++        whether a conflicting proposal is allowed to take effect;
++      - the Performance Monitoring (PMon) component (pmon.py), feeding
++        Implicit Conflict Detection (ImCD), which is inherently post-action.
++
++    Unlike a plain KPM/RIC-Control xApp, this one sits *in front of* the
++    MRO and MLB xApps' control path: before either of them sends a RIC
++    Control Request to a cell, it POSTs the proposed decision to this xApp's
++    HTTP endpoint (/ric/v1/cmf/evaluate). This xApp is the only place a
++    decision can be blocked from ever reaching the RAN - exactly what the
++    paper's Fig. 2 depicts ("Message Infrastructure... redirect all control
++    messages from xApps into the CM component"). A real RMR-level interposition
++    (rerouting message type RIC_CONTROL_REQ itself) is not practical with the
++    reply-to-sender pattern used to target a specific E2 node (see the
++    project README for the reasoning); a synchronous HTTP call achieves the
++    same net effect - the RAN is never reached before this xApp is asked -
++    without fighting RMR's static routing tables.
++
++    Independently, this xApp also subscribes to the KPM RAN function (200)
++    on every E2 node, purely to feed PMon with the per-cell satisfaction KPI
++    it needs for ImCD.
+     """
+ 
++    # Conflict resolution policy applied by the CR Agent. One of CrMode.NONE
++    # (detect only, matching the paper's "CM disabled" baseline), CrMode.PRIO_MRO
++    # or CrMode.PRIO_MLB (matching the paper's two prioritization modes).
++    CM_MODE = CrMode.PRIO_MRO
++
+     def __init__(self):
+         """
+         Initializes the custom xApp instance and instatiates the xApp framework object.
+         """
+ 
+-        self.enable_ran_slicing = True # If false it only executes KPM without RC
+-        self.save_influx = True # If true it saves the data in InfluxDB
++        self.save_influx = True  # If true it saves the data in InfluxDB
+ 
+-        # Initializing a logger for the custom xApp instance in Debug level (logs everything)
+-        self.logger = Logger(
+-            name="XappNori", level=Level.DEBUG
+-        )  # The name is included in each log entry, Levels: DEBUG < INFO < WARNING < ERROR
+-        # self.logger.get_env_params_values() # Getting the MDC key-value pairs from the environment
+-        self.logger.info("Initializing the xApp.")
+-
+-        # Initializing custom control variables
+-        self._shutdown = False  # Stops the xApp loop if True
+-        self._ready = False  # True when the xApp is ready to start
+-        self.subscription_responses: Dict[int, Dict] = (
+-            {}
+-        )  # Stores the subscription responses for each E2 node inventory name
+-        self.sub_id_to_node: Dict[str, str] = (
+-            {}
+-        )  # Maps subscription IDs to E2 node inventory names
++        self.logger = Logger(name="XappCmf", level=Level.DEBUG)
++        self.logger.info(f"Initializing the CMF xApp (CR mode: {self.CM_MODE.value}).")
+ 
+-        # Instatiating the xApp framework object
+-        self._rmrxapp = RMRXapp(
+-            default_handler=self.default_rmr_handler,  # Called when no specific handler is found for an RMR message
+-            config_handler=self.config_change_handler,  # Called when a config change event is detected by inotify
+-            post_init=self.post_init,  # Called during the RMRXapp initialization, right after _BaseXapp is initialized
+-            rmr_port=4560,  # Port for RMR data
+-            rmr_wait_for_ready=True,  # Block xApp initiation until RMR is ready
+-            use_fake_sdl=False,  # Use a fake in-memory SDL
+-        )
+-
+-        # RL Server
+-        if self.enable_ran_slicing:
+-            self.slice_ues = {
+-                1 : ["00001", "00002",],
+-                2 : ["00003", "00004",],
+-            }
+-            self.env = MobNet(debug=True)
+-            self.env_thread = Thread(target=server_rl, daemon=True)
+-            self.env_thread.start()
++        self._shutdown = False
++        self._ready = False
++        self.subscription_responses: Dict[int, Dict] = {}
++        self.sub_id_to_node: Dict[str, str] = {}
++
++        # --- the three CMF components ---
++        self.cd_agent = ConflictDetectionAgent()
++        self.cr_agent = ConflictResolutionAgent(mode=self.CM_MODE)
++        self.pmon = PerformanceMonitor(
++            cd_agent=self.cd_agent,
++            report_callback=self._on_implicit_conflict,
++        )
+ 
++        self._conflict_log_path = "/tmp/conflicts.json"
++        self._conflict_log = open(self._conflict_log_path, "a", buffering=1)
++
++        self._rmrxapp = RMRXapp(
++            default_handler=self.default_rmr_handler,
++            config_handler=self.config_change_handler,
++            post_init=self.post_init,
++            rmr_port=4560,
++            rmr_wait_for_ready=True,
++            use_fake_sdl=False,
++        )
+ 
+-        # Registering RMR message handlers
+         self._rmrxapp.register_callback(
+             handler=self.ric_indication_handler, message_type=12050
+         )
+ 
+-        # Registering a handler for terminating the xApp after TERMINATE, QUIT, or INTERRUPT signals
+         signal.signal(signal.SIGTERM, self._handle_signal)
+         signal.signal(signal.SIGQUIT, self._handle_signal)
+         signal.signal(signal.SIGINT, self._handle_signal)
+ 
+-        # Starting a threaded HTTP server listening to any host at port 8080
+         self.http_server = xapp_rest.ThreadedHTTPServer("0.0.0.0", 8080)
+         self.http_server.handler.add_handler(
+             self.http_server.handler,
+@@ -124,60 +141,38 @@
+             uri="/ric/v1/resubscribe",
+             callback=self.resubscribe_handler,
+         )
++        # The one endpoint that actually makes this a Conflict Mitigation
++        # Framework rather than just another KPM xApp: MRO/MLB call this
++        # *before* sending a RIC Control Request, and only proceed if allowed.
++        self.http_server.handler.add_handler(
++            self.http_server.handler,
++            method="POST",
++            name="cmf_evaluate",
++            uri="/ric/v1/cmf/evaluate",
++            callback=self.cmf_evaluate_handler,
++        )
+         self.logger.info("Starting HTTP server.")
+         self.http_server.start()
+ 
+-        # xApp is ready to start
+         self._ready = True
+         self.logger.info("xApp is ready.")
+ 
+-        # InfluxDB client
+         if self.save_influx:
+-            url = "http://influxdb-influxdb2.influxdb.svc.cluster.local:8086"  # URL of your InfluxDB instance
+-            token = "admin"  # your InfluxDB token
+-            org = "openranbr"  # your InfluxDB organization name
+-            self.bucket = "openranbr"  # your InfluxDB bucket name
++            url = "http://influxdb-influxdb2.influxdb.svc.cluster.local:8086"
++            token = "admin"
++            org = "openranbr"
++            self.bucket = "openranbr"
+             self.client = InfluxDBClient(url=url, token=token, org=org)
+             self.write_api = self.client.write_api()
+-        
+-        if self.enable_ran_slicing:
+-            # RL Client
+-            sleep(10)
+-            SERVER_ADDRESS = "localhost"
+-            RAY_STORAGE = "./ray_results/"
+-            AGENT_NAME = "ppo"
+-            SERVER_BASE_PORT = 9900
+-            self.test_mode = False
+-            self.env.reset()
+-            if self.test_mode:  # Testing
+-                ray_storage = str(Path(RAY_STORAGE).resolve())
+-                analysis = tune.ExperimentAnalysis(f"{ray_storage}/{AGENT_NAME}/")
+-                assert analysis.trials is not None, "Analysis trial is None"
+-                last_checkpoint = analysis.get_last_checkpoint(analysis.trials[0])
+-                assert last_checkpoint is not None, "Last checkpoint is None"
+-                self.algo = Algorithm.from_checkpoint(last_checkpoint)
+-            else:  # Training
+-                self.client = PolicyClient(
+-                    f"http://{SERVER_ADDRESS}:{SERVER_BASE_PORT}",
+-                    inference_mode="local",
+-                )
+-                self.eid = self.client.start_episode(training_enabled=True)
+ 
+     # ------------------ START AND STOP
+ 
+     def start(self):
+-        """
+-        Starts the xApp loop.
+-        """
+-
+         self.log_gnbs()
+         Thread(target=self.subscribe_to_e2_nodes).start()
+         self._rmrxapp.run()
+ 
+     def stop(self):
+-        """
+-        Terminates the xApp. Can only be called if the xApp is running in threaded mode.
+-        """
+         self._shutdown = True
+         self.unsubscribe_from_e2_nodes()
+         self.logger.info(
+@@ -185,605 +180,335 @@
+         )
+         self._rmrxapp.stop()
+         self.http_server.stop()
++        self._conflict_log.close()
+ 
+     # ------------------ RMRXAPP INTERNAL FUNCTIONS
+ 
+-    def config_change_handler(self, rmrxapp: RMRXapp, json: dict):
+-        """
+-        Handler for the config change event.
+-        """
++    def config_change_handler(self, rmrxapp: RMRXapp, json_cfg: dict):
+         self.logger.info("Detected a config change event.")
+-
+-        rmrxapp._config_data = json
+-        self.logger.debug("New config data: {}.".format(json))
++        rmrxapp._config_data = json_cfg
+ 
+     def post_init(self, rmrxapp: RMRXapp):
+-        """
+-        Post initialization function.
+-        """
+         self.logger.info("Post initialization called.")
+ 
+-    # ------------------ E2 NODES
++    # ------------------ E2 NODES (KPM subscription, feeding PMon only)
+ 
+     def log_gnbs(self):
+-        """
+-        Logs RAN information for each registered gNB.
+-        """
+-
+         nbid_list = self._rmrxapp.GetListNodebIds()
+         if len(nbid_list) == 0:
+             self.logger.info("No gNBs registered.")
+             return
+-        self.logger.info("Logging gNBs.")
+         for nbid in nbid_list:
+-            self.logger.info(f"Logging NodeB info for gNB: {nbid.inventory_name}")
+-            global_nb_id = nbid.global_nb_id
+-            self.logger.info(f"PLMN ID: {global_nb_id.plmn_id}")
+-            self.logger.info(f"NNBID: {global_nb_id.nb_id}")
+-            self.logger.info(f"Connection status: {nbid.connection_status}")  # 1 ????
+-            self.logger.info(
+-                f"Health Check Timestamp Received: {nbid.health_check_timestamp_received}"
+-            )  # 0 ???
+-            self.logger.info(
+-                f"Health Check Timestamp Sent: {nbid.health_check_timestamp_sent}"
+-            )  # 0 ???
+-
+-            nbinfo = self._rmrxapp.GetNodeb(nbid.inventory_name)
+             self.logger.info(
+-                f"Associated E2T Instance Address: {nbinfo.associated_e2t_instance_address}"
+-            )  # E2Term IP:PORT
+-            self.logger.info(
+-                f"E2 Application Protocol: {nbinfo.e2_application_protocol}"
+-            )  # 0 ???
+-            self.logger.info(f"Failure Type: {nbinfo.failure_type}")  # 0 ???
+-            self.logger.info(f"Node Type: {nbinfo.node_type}")  # 2 ????
+-            self.logger.info(
+-                f"RAN Name: {nbinfo.ran_name}"
+-            )  # Same as the inventory name
+-            self.logger.info(
+-                f"Setup From Network: {nbinfo.setup_from_network}"
+-            )  # True ??
+-
+-            gnb = nbinfo.gnb
+-            self.logger.info(f"GNB Type: {gnb.gnb_type}")  # 1 ????
+-            self.logger.info(
+-                f"Served NR Cells: {gnb.served_nr_cells}"
+-            )  # No cells informed
+-
+-            self.logger.info("NodeB Configurations:")
+-            i = 1
+-            for config in gnb.node_configs:
+-                self.logger.info(f"Configuration {i}")
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceType: {config.e2nodeComponentInterfaceType}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeE1: {config.e2nodeComponentInterfaceTypeE1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeF1: {config.e2nodeComponentInterfaceTypeF1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeNG: {config.e2nodeComponentInterfaceTypeNG}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeS1: {config.e2nodeComponentInterfaceTypeS1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeW1: {config.e2nodeComponentInterfaceTypeW1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeX2: {config.e2nodeComponentInterfaceTypeX2}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeXn: {config.e2nodeComponentInterfaceTypeXn}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentRequestPart: {config.e2nodeComponentRequestPart}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentResponsePart: {config.e2nodeComponentResponsePart}"
+-                )
+-                i += 1
+-
+-            self.logger.info("RAN Functions:")
+-            for ran_func in gnb.ran_functions:
+-                self.logger.info(f"RAN Function ID: {ran_func.ran_function_id}")
+-                self.logger.info(
+-                    f"RAN Function Revision: {ran_func.ran_function_revision}"
+-                )
+-                self.logger.info(f"RAN Function OID: {ran_func.ran_function_oid}")
+-                self.logger.info(
+-                    f"RAN Function Definition: {ran_func.ran_function_definition}"
+-                )
++                f"Registered gNB: {nbid.inventory_name}, connection status: {nbid.connection_status}"
++            )
+ 
+     def subscribe_to_e2_nodes(self):
+-        """
+-        Subscribes to all available E2 nodes.
+-        """
+         e2_nodes = self._rmrxapp.GetListNodebIds()
+         sub_trs_id = self._rmrxapp.sdl_get(
+-            namespace="xappnori", key="subscription_transaction_id"
++            namespace="xappcmf", key="subscription_transaction_id"
+         )
+         if sub_trs_id is None:
+             sub_trs_id = 54321
+         for node in e2_nodes:
+-            self.logger.info(
+-                f"Subscribing to node {node.inventory_name}"
+-            )  # We use the inventory name as the node ID
+-
+-            # Sending the subscription request
++            self.logger.info(f"Subscribing to node {node.inventory_name}")
+             subscription_req = self.generate_subscription_request(
+                 node.inventory_name, sub_trs_id
+             )
+-            self.logger.debug(f"Subscription request: {subscription_req}")
+-            resp = requests.post(
+-                "http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions",
+-                json=subscription_req,
+-            )
+-            status = resp.status_code
+-            reason = resp.reason
+-
+-            # Handling the subscription response
++            try:
++                resp = requests.post(
++                    "http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions",
++                    json=subscription_req,
++                    timeout=10,
++                )
++            except requests.exceptions.RequestException as exc:
++                self.logger.warning(
++                    f"Subscribe request to node {node.inventory_name} failed: {exc}"
++                )
++                continue
+             if int(resp.status_code / 100) != 2:
+                 self.logger.error(
+                     f"Failed to subscribe to node {node.inventory_name}. Status code: {resp.status_code}, reason: {resp.reason}"
+                 )
+                 continue
+-            data = (
+-                resp.json()
+-            )  # {"SubscriptionId": "my_string_id", "SubscriptionInstances": null}
++            data = resp.json()
+             self.sub_id_to_node[data["SubscriptionId"]] = node.inventory_name
+             self.subscription_responses[node.inventory_name] = data
+-            self.logger.debug(
+-                f"Subscription response from {node.inventory_name}: status = {status}, reason = {reason}, data = {data}"
+-            )
+             self._rmrxapp.sdl_set(
+-                namespace="xappnori",
++                namespace="xappcmf",
+                 key="subscription_transaction_id",
+                 value=sub_trs_id + 1,
+-            )  # Update sub_trs_id on SDL
++            )
+ 
+     def unsubscribe_from_e2_nodes(self):
+-        """
+-        Unsubscribes from all subscribed E2 nodes (stored in the self.subscription_responses dict).
+-        """
+-
+-        for sub_id in self.sub_id_to_node.keys():
+-            resp = requests.delete(
+-                f"http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions/{sub_id}"
+-            )
+-            status = resp.status_code
+-            reason = resp.reason
+-            self.logger.info(
+-                f"Unsubscribe from sub id {sub_id}: status = {status}, reason = {reason}"
+-            )
++        for sub_id in list(self.sub_id_to_node.keys()):
++            try:
++                resp = requests.delete(
++                    f"http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions/{sub_id}",
++                    timeout=10,
++                )
++                self.logger.info(
++                    f"Unsubscribe from sub id {sub_id}: status = {resp.status_code}, reason = {resp.reason}"
++                )
++            except requests.exceptions.RequestException as exc:
++                self.logger.warning(f"Unsubscribe from sub id {sub_id} failed: {exc}")
++        self.sub_id_to_node.clear()
++        self.subscription_responses.clear()
+ 
+     def resubscribe_to_e2_nodes(self):
+-        """
+-        Resubscribes to all E2 nodes.
+-        """
+         self.unsubscribe_from_e2_nodes()
+         self.subscribe_to_e2_nodes()
+ 
+     # ------------------ SIGNAL HANDLERS
+ 
+     def _handle_signal(self, signum: int, frame):
+-        """
+-        Function called when a Kubernetes signal is received to stop the xApp execution.
+-        """
+         self.logger.info(
+             "Received signal {} to stop the xApp.".format(signal.Signals(signum).name)
+         )
+-        self.stop()  # Custom xApp termination routine
++        self.stop()
+ 
+     # ------------------ RMR MESSAGE HANDLERS
+ 
+     def default_rmr_handler(self, rmrxapp: RMRXapp, summary: dict, sbuf):
+-        """
+-        Default RMR message handler.
+-        """
+         self.logger.info("Received RMR message with summary: {}.".format(summary))
+-        rmrxapp.rmr_free(sbuf)  # Freeing the RMR message buffer
++        rmrxapp.rmr_free(sbuf)
+ 
+     def ric_indication_handler(self, rmrxapp: RMRXapp, summary: dict, sbuf):
+         """
+-        Handler for RIC indication messages.
++        The only thing this xApp does with a KPM indication is feed PMon: it
++        never writes any RAN parameter itself.
+         """
+-        # self.logger.info(f"Received RIC indication message with summary: {summary}.")
+-
+         msg = summary["payload"]
+-        # self.logger.debug(f"Received payload from RIC indication message: {msg}")
+ 
+-        # Decoding the E2AP PDU data
+         pdu = E2AP_PDU_Descriptions.E2AP_PDU
+         pdu.from_aper(msg)
+         decoded_pdu = pdu.get_val()
+-        e2pdu_data = {
+-            "ricRequestorID": decoded_pdu[1]["value"][1]["protocolIEs"][0]["value"][1][
+-                "ricRequestorID"
+-            ],
+-            "ricInstanceID": decoded_pdu[1]["value"][1]["protocolIEs"][0]["value"][1][
+-                "ricInstanceID"
+-            ],
+-            "RANfunctionID": decoded_pdu[1]["value"][1]["protocolIEs"][1]["value"][1],
+-            "RICactionID": decoded_pdu[1]["value"][1]["protocolIEs"][2]["value"][1],
+-            "RICindicationSN": decoded_pdu[1]["value"][1]["protocolIEs"][3]["value"][1],
+-            "RICindicationType": decoded_pdu[1]["value"][1]["protocolIEs"][4]["value"][
+-                1
+-            ],
+-            "RICcallProcessID": decoded_pdu[1]["value"][1]["protocolIEs"][7]["value"][
+-                1
+-            ],
+-        }
+ 
+-        # Decoding the E2SM RIC Indication data
+-        ric_indication_header_msg = decoded_pdu[1]["value"][1]["protocolIEs"][5][
+-            "value"
+-        ][1]
+-        ric_indication_message_msg = decoded_pdu[1]["value"][1]["protocolIEs"][6][
+-            "value"
+-        ][1]
+-        ric_indication_header = E2SM_KPM_RC.E2SM_KPM_IndicationHeader
++        ric_indication_header_msg = decoded_pdu[1]["value"][1]["protocolIEs"][5]["value"][1]
++        ric_indication_message_msg = decoded_pdu[1]["value"][1]["protocolIEs"][6]["value"][1]
+         ric_indication_message = E2SM_KPM_RC.E2SM_KPM_IndicationMessage
+-        ric_indication_header.from_aper(ric_indication_header_msg)
+         ric_indication_message.from_aper(ric_indication_message_msg)
+-        decoded_ric_indication_header = ric_indication_header.get_val()
+         decoded_ric_indication_message = ric_indication_message.get_val()
+-        ric_indication_data = {
+-            "indicationHeader": decoded_ric_indication_header,
+-            "indicationMessage": decoded_ric_indication_message,
+-        }
+ 
+-        # self.logger.info(f"\n\n\n\nDecoded RIC indication data: {ric_indication_data}\n#################\n\n\n\n")
++        self._feed_pmon(decoded_ric_indication_message)
+ 
+-        # Send information to InfluxDB
+-        if self.save_influx:
+-            self.send_influxdb_data(ric_indication_data)
++        rmrxapp.rmr_free(sbuf)
+ 
+-        if self.enable_ran_slicing:
+-            ########### Interaction with RL Environment
+-            # Observation
+-            ues_thr = self.get_thr_data(ric_indication_data)
+-            slice1_ues_thr = []
+-            slice2_ues_thr = []
+-            for ue_id, ue_thr in ues_thr:
+-                if ue_id in self.slice_ues[1]:
+-                    slice1_ues_thr.append(ue_thr)
+-                elif ue_id in self.slice_ues[2]:
+-                    slice2_ues_thr.append(ue_thr)
+-            if (len(slice1_ues_thr) + len(slice2_ues_thr)) == 0:
+-                # self.logger.warning("No UEs in the slices.")
+-                # print(f"\n\n\n\n\n#########################\n{ric_indication_data}\n#########################\n\n\n\n\n")
+-                return
+-            slice_1_avg_thr = float(np.mean(slice1_ues_thr))
+-            slice_2_avg_thr = float(np.mean(slice2_ues_thr))
+-            obs = np.array([slice_1_avg_thr, slice_2_avg_thr])
+-
+-            if self.test_mode:  # Testing
+-                action = self.algo.compute_single_action(obs, explore=False)
+-            else:  # Training
+-                action = self.client.get_action(self.eid, obs)
+-            assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-            perc_action = np.floor((action / np.sum(action)) * 100)
+-            self.env.set_obs(obs)
+-            self.obs, reward, terminated, truncated, info = self.env.step(action)
+-            if not self.test_mode:  # Training
+-                self.client.log_returns(self.eid, reward, info=info)
+-            if terminated or truncated:
+-                obs, info = self.env.reset()
+-                if not self.test_mode:  # Training
+-                    self.client.end_episode(self.eid, obs)
+-                    self.eid = self.client.start_episode(training_enabled=True)
+-            ###################################
+-
+-            # Sending the RAN slicing control message to the RIC
+-            for slice_id in range(2):
+-                sst = b"\x01" if slice_id == 1 else b"\x00"
+-                sd = b"\x00\x00\x00"
+-            slices_id = [
+-                {"sST": b"\x00", "sD": b"\x00\x00\x00"},
+-                {"sST": b"\x01", "sD": b"\x00\x00\x00"},]
+-            
+-            self.send_ran_slicing_control(
+-                slices_id, perc_action, rmrxapp, summary, sbuf
++    def _feed_pmon(self, indication_message: tuple) -> None:
++        msg = indication_message[1]
++        cell_object_id = msg.get("cellObjectID", "")
++        cell_id = _parse_cell_id(cell_object_id)
++        if cell_id is None:
++            return
++
++        satisfaction_permille = None
++        for pm_info in msg.get("list-of-PM-Information", []):
++            if pm_info["pmType"][1] == "QoS.MeanUeSatisfactionPermille":
++                _, satisfaction_permille = pm_info["pmVal"]
++                break
++        if satisfaction_permille is None:
++            return
++
++        self.pmon.observe(cell_id, satisfaction_permille / 1000.0, time.time())
++
++    # ------------------ CMF: the actual conflict mitigation endpoint
++
++    def cmf_evaluate_handler(self, name: str, path: str, data: bytes, ctype: str):
++        """
++        Handler for POST /ric/v1/cmf/evaluate. Body:
++            {"source": "MRO"|"MLB", "cellId": <int>, "parameterId": 1|2|3, "value": <float>}
++        Response:
++            {"allowed": true}
++            {"allowed": false, "reason": "..."}
++        """
++        try:
++            body = json.loads(data.decode())
++            record = ControlRecord(
++                source=str(body["source"]),
++                cell_id=int(body["cellId"]),
++                parameter_id=int(body["parameterId"]),
++                value=float(body["value"]),
++                timestamp=time.time(),
+             )
++        except (KeyError, ValueError, TypeError) as exc:
++            self.logger.warning(f"Malformed /ric/v1/cmf/evaluate request: {exc}")
++            response = xapp_rest.initResponse(status=400, response="Bad Request")
++            response["payload"] = json.dumps({"allowed": False, "reason": "malformed request"})
++            return response
+ 
+-        rmrxapp.rmr_free(sbuf)
++        conflicts = self.cd_agent.evaluate(record)
++        resolution = self.cr_agent.resolve(conflicts)
+ 
+-    # ------------------ HTTP HANDLERS
++        for c in conflicts:
++            self._log_conflict(c)
+ 
+-    def send_influxdb_data(self, data:dict):
+-        points = []
++        if self.save_influx:
++            try:
++                self._send_evaluation_point(record, conflicts, resolution)
++            except Exception as exc:  # noqa: BLE001
++                self.logger.warning(f"Failed to write CMF point to InfluxDB: {exc}")
+ 
+-        # Common tags
+-        collection_start_time = datetime.datetime.now(datetime.timezone.utc) 
++        if conflicts:
++            self.logger.info(
++                f"Cell {record.cell_id}: {record.source} proposes "
++                f"{record.parameter_name()}={record.value} -> "
++                f"{'ALLOWED' if resolution.allowed else 'REJECTED'}"
++                + (f" ({resolution.reason})" if resolution.reason else "")
++            )
+ 
+-        # Extract cellObjectID
+-        cell_object_id = data['indicationMessage'][1]['cellObjectID']
+-
+-        # Cell-level PM info
+-        if 'list-of-PM-Information' in data['indicationMessage'][1]:
+-            for pm_info in data['indicationMessage'][1]['list-of-PM-Information']:
+-                pm_type = pm_info['pmType'][1]
+-                pm_val_type, pm_val = pm_info['pmVal']
+-
+-                # Create a Point
+-                p = Point("cell_metrics") \
+-                    .tag("cellObjectID", cell_object_id) \
+-                    .field(pm_type, pm_val) \
+-                    .time(collection_start_time, WritePrecision.NS)
+-
+-                points.append(p)
+-
+-        # UE-level PM info
+-        if 'list-of-matched-UEs' in data['indicationMessage'][1]:
+-            for ue in data['indicationMessage'][1]['list-of-matched-UEs']:
+-                ue_id = ue['ueId'].decode()  # ueId is a byte string
+-
+-                for pm_info in ue['list-of-PM-Information']:
+-                    pm_type = pm_info['pmType'][1]
+-                    pm_val_type, pm_val = pm_info['pmVal']
+-
+-                    # Handle valueReal tuple if needed
+-                    if pm_val_type == 'valueReal':
+-                        # pm_val[0] is matissa, pm_val[1] is base, pm_val[2] is exponent
+-                        real_value = float(pm_val[0]) * float(pm_val[1]**(-pm_val[2]))
+-                    elif isinstance(pm_val,dict) and 'servingCellMeasurements' in pm_val:
+-                        # Extract the SINR value from the nested structure
+-                        sinr_value = pm_val['servingCellMeasurements'][1][0]['measResultServingCell']['measResult']['cellResults']['resultsSSB-Cell']['sinr']
+-                        real_value = sinr_value
+-                    elif isinstance(pm_val, dict):
+-                        real_value = None
+-                    else:
+-                        real_value = pm_val
+-
+-                    if real_value is not None:
+-                        # Create a Point
+-                        p = Point("ue_metrics") \
+-                            .tag("cellObjectID", cell_object_id) \
+-                            .tag("ueId", ue_id) \
+-                            .field(pm_type, real_value) \
+-                            .time(collection_start_time, WritePrecision.NS)
+-
+-                        points.append(p)
+-        self.write_api.write(bucket=self.bucket, record=points)
+-        # self.logger.info(f"Data sent to InfluxDB: {len(points)} points")
+-
+-    def get_thr_data(self, data:dict)->list:
+-        # Extract cellObjectID
+-        cell_object_id = data['indicationMessage'][1]['cellObjectID']
+-        thr_ues = []
+-        # UE-level PM info
+-        if 'list-of-matched-UEs' in data['indicationMessage'][1]:
+-            for ue in data['indicationMessage'][1]['list-of-matched-UEs']:
+-                ue_id = ue['ueId'].decode()  # ueId is a byte string
+-                for pm_info in ue['list-of-PM-Information']:
+-                    pm_type = pm_info['pmType'][1]
+-                    pm_val_type, pm_val = pm_info['pmVal']
+-                    if pm_type == "QosFlow.PdcpPduVolumeDL_Filter.UEID":
+-                        ue_thr = (50*float(pm_val))/1000 # Mbps
+-                        thr_ues.append((ue_id, ue_thr))
+-
+-        return thr_ues
+-
+-    def send_ran_slicing_control(
+-        self, slices_id: dict, action: np.ndarray, rmrxapp: RMRXapp, summary: dict, sbuf
+-    ):
+-        """
+-        Sends a RAN slicing control message to the RIC.
+-        """
++        response = xapp_rest.initResponse(status=200, response="Evaluated")
++        payload = {"allowed": resolution.allowed}
++        if resolution.reason:
++            payload["reason"] = resolution.reason
++        response["payload"] = json.dumps(payload)
++        return response
+ 
+-        ####### Creating RIC Control Request to control PRB slice quota
+-        # Encoding RIC Control Header
+-        asn1_control_header = E2SM_KPM_RC.E2SM_RC_ControlHeader
+-        rrm_policy_list = []
+-        for slice_id, rb_alloc in zip(slices_id, action):
+-            rrm_policy = {
+-                "rrmPolicy": {
+-                    "rrmPolicyMemberList": [
+-                        {
+-                            "plmnIdentity": b"\x00\x01\x02",
+-                            "sNSSAI": {
+-                                "sST": slice_id["sST"],
+-                                "sD": slice_id["sD"],
+-                            },
+-                        }
+-                    ]
++    def _on_implicit_conflict(self, cell_id: int, sources: Set[str]) -> None:
++        self.logger.info(
++            f"ImCD: implicit conflict on cell {cell_id} between {sorted(sources)} "
++            f"(correlated with a sustained drop in QoS.MeanUeSatisfactionPermille)"
++        )
++        line = {
++            "source": "ImCD",
++            "command": "Notify",
++            "conflictType": "implicit",
++            "timestamp": _iso_now(),
++            "degradKPI": "QoS.MeanUeSatisfactionPermille",
++            "targetCell": cell_id,
++            "involvedSources": sorted(sources),
++        }
++        self._conflict_log.write(json.dumps(line) + "\n")
++        if self.save_influx:
++            try:
++                p = (
++                    Point("cmf_conflicts")
++                    .tag("cellId", str(cell_id))
++                    .tag("detector", "ImCD")
++                    .field("conflictType", "implicit")
++                    .field("sources", ",".join(sorted(sources)))
++                    .time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.NS)
++                )
++                self.write_api.write(bucket=self.bucket, record=[p])
++            except Exception as exc:  # noqa: BLE001
++                self.logger.warning(f"Failed to write ImCD point to InfluxDB: {exc}")
++
++    def _log_conflict(self, conflict) -> None:
++        # Same shape as json_messages/{DCD,ICD}/*signal conflict.json in the
++        # reference repository (czezy/O-RAN_CMF_CM2023).
++        line = {
++            "source": conflict.detector,
++            "command": "Notify",
++            "conflictType": conflict.conflict_type,
++            "timestamp": _iso_now(),
++            "decisions": [
++                {
++                    "content": {
++                        "source": conflict.proposal.source,
++                        "command": "Modify",
++                        "targetParameter": conflict.proposal.parameter_name(),
++                        "targetValue": str(conflict.proposal.value),
++                        "targetCell": conflict.proposal.cell_id,
++                    }
++                },
++                {
++                    "content": {
++                        "source": conflict.existing.source,
++                        "command": "Modify",
++                        "targetParameter": conflict.existing.parameter_name(),
++                        "targetValue": str(conflict.existing.value),
++                        "targetCell": conflict.existing.cell_id,
++                    }
+                 },
+-                "dedicatedPRBPolicyRatio": int(rb_alloc),
+-                "minPRBPolicyRatio": int(rb_alloc),
+-                "maxPRBPolicyRatio": 100,
+-            }
+-            rrm_policy_list.append(rrm_policy)
+-        ric_control_header = ('controlHeader-Format1', {
+-            "ueId":b'\x00\x01', 
+-            "ric-ControlStyle-Type": 1, 
+-            "ric-ControlAction-ID": 1, 
+-            "rrmPolicyList": rrm_policy_list,
++            ],
+         }
++        if conflict.group_name:
++            line["groupName"] = conflict.group_name
++        self._conflict_log.write(json.dumps(line) + "\n")
++
++    def _send_evaluation_point(self, record: ControlRecord, conflicts, resolution) -> None:
++        p = (
++            Point("cmf_evaluations")
++            .tag("cellId", str(record.cell_id))
++            .tag("source", record.source)
++            .tag("parameter", record.parameter_name())
++            .field("value", record.value)
++            .field("conflicts", len(conflicts))
++            .field("allowed", resolution.allowed)
++            .time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.NS)
+         )
++        self.write_api.write(bucket=self.bucket, record=[p])
+ 
+-        asn1_control_header.set_val(ric_control_header)
+-        coded_control_header = asn1_control_header.to_aper()
+-
+-        # Encoding RIC Control Request
+-        asn1_pdu = E2AP_PDU_Descriptions.E2AP_PDU
+-        ric_request_msg = (
+-            "initiatingMessage",
+-            {
+-                "procedureCode": 4,
+-                "criticality": "ignore",
+-                "value": (
+-                    "RICcontrolRequest",
+-                    {
+-                        "protocolIEs": [
+-                            {
+-                                "id": 29,
+-                                "criticality": "reject",
+-                                "value": (
+-                                    "RICrequestID",
+-                                    {"ricRequestorID": 1003, "ricInstanceID": 1},
+-                                ),
+-                            },
+-                            {
+-                                "id": 5,
+-                                "criticality": "reject",
+-                                "value": ("RANfunctionID", 200),
+-                            },
+-                            {
+-                                "id": 20,
+-                                "criticality": "reject",
+-                                "value": ("RICcallProcessID", b"\x00\x01"),
+-                            },
+-                            {
+-                                "id": 22,
+-                                "criticality": "reject",
+-                                "value": ("RICcontrolHeader", coded_control_header),
+-                            },
+-                            {
+-                                "id": 23,
+-                                "criticality": "reject",
+-                                "value": ("RICcontrolMessage", b"\x00\x01"),
+-                            },
+-                        ]
+-                    },
+-                ),
+-            },
+-        )
+-        asn1_pdu.set_val(ric_request_msg)
+-        coded_pdu = asn1_pdu.to_aper()
+-
+-        # Sending the RIC Control Request
+-        rmrxapp.rmr_rts(
+-            sbuf, new_payload=coded_pdu, new_mtype=12040
+-        )  # 12040 = RIC Control Request
+-
+-        # # Decoding RIC Control Request
+-        # asn1_pdu.from_aper(coded_pdu)
+-        # decoded_pdu = asn1_pdu.get_val()
+-        # self.logger.info(f"\n\n\n################\nDecoded PDU: {decoded_pdu}")
+-
+-        # # Decoding RIC Control Header
+-        # assert decoded_pdu is not None, "Decoded PDU is None"
+-        # coded_control = decoded_pdu[1]["value"][1]["protocolIEs"][3]["value"][1]
+-        # asn1_control_header.from_aper(coded_control)
+-        # decoded_control = asn1_control_header.get_val()
+-        # self.logger.info(f"\n\n\n################\nDecoded Control Header: {decoded_control}")
++    # ------------------ HTTP HANDLERS (framework plumbing)
+ 
+     def resubscribe_handler(self, name: str, path: str, data: bytes, ctype: str):
+-        """
+-        Handler for the HTTP GET /ric/v1/resubscribe request.
+-        """
+         self.logger.info(
+             "Received GET /ric/v1/resubscribe request, resubscribing to E2 Nodes"
+         )
+-        self.resubscribe_to_e2_nodes()
++        Thread(target=self.resubscribe_to_e2_nodes, daemon=True).start()
+         response = xapp_rest.initResponse(
+-            status=200, response="xApp ACKs resubscription request"  # Status = 200 OK
+-        )  # Initiating HTTP response
++            status=200,
++            response="xApp ACKs resubscription request, resubscribing in the background",
++        )
+         return response
+ 
+-    def subscription_response_handler(
+-        self, name: str, path: str, data: bytes, ctype: str
+-    ):
+-        """
+-        Handler for the HTTP POST /ric/v1/subscriptions/response request.
+-        """
++    def subscription_response_handler(self, name: str, path: str, data: bytes, ctype: str):
+         sub_resp = json.loads(data.decode())
+         self.logger.info(
+-            "Received POST /ric/v1/subscriptions/response request with data {}.".format(
+-                sub_resp
+-            )
++            "Received POST /ric/v1/subscriptions/response request with data {}.".format(sub_resp)
+         )
+-        nodeb = self.sub_id_to_node[sub_resp["SubscriptionId"]]
+-        self.subscription_responses[nodeb]["SubscriptionInstances"] = sub_resp[
+-            "SubscriptionInstances"
+-        ]
++        nodeb = self.sub_id_to_node.get(sub_resp["SubscriptionId"])
++        if nodeb is None:
++            self.logger.warning(
++                f"Subscription response for unknown/stale SubscriptionId {sub_resp['SubscriptionId']}, ignoring."
++            )
++        else:
++            self.subscription_responses[nodeb]["SubscriptionInstances"] = sub_resp[
++                "SubscriptionInstances"
++            ]
+         response = xapp_rest.initResponse(
+-            status=200,  # Status = 200 OK
+-            response="xApp ACKs the subscription response",
+-        )  # Initiating HTTP response
+-
+-        # Resubscribing if RtMgr did not create xApp routes
+-        # if sub_resp["SubscriptionInstances"] is not None:
+-        #    for sub_inst in sub_resp["SubscriptionInstances"]:
+-        #        if "CREATE routeinfo" in sub_inst["ErrorCause"]:
+-        #            self.logger.error("RtMgr did not creat a route to the xApp yet, resubscribing to E2 Nodes...")
+-        #            Thread(target=self.resubscribe_to_e2_nodes).start()
++            status=200, response="xApp ACKs the subscription response"
++        )
+         return response
+ 
+     def config_handler(self, name: str, path: str, data: bytes, ctype: str):
+-        """
+-        Handler for the HTTP GET /ric/v1/config request.
+-        """
+-        # self.logger.info("Received GET /ric/v1/config request with content type {}.".format(ctype))
+-        response = xapp_rest.initResponse(
+-            status=200, response="Config data"  # Status = 200 OK
+-        )  # Initiating HTTP response
+-        response["payload"] = json.dumps(
+-            self._rmrxapp._config_data
+-        )  # Payload = the xApp config-file
+-        # self.logger.debug("Config handler response: {}.".format(response))
++        response = xapp_rest.initResponse(status=200, response="Config data")
++        response["payload"] = json.dumps(self._rmrxapp._config_data)
+         return response
+ 
+     def liveness_handler(self, name: str, path: str, data: bytes, ctype: str):
+-        """
+-        Handler for the HTTP GET /ric/v1/health/alive request.
+-        """
+-        # self.logger.info("Received GET /ric/v1/health/alive request with content type {}.".format(ctype))
+-        response = xapp_rest.initResponse(
+-            status=200, response="Liveness"  # Status = 200 OK
+-        )  # Initiating HTTP response
+-        response["payload"] = json.dumps(
+-            {"status": "Healthy"}
+-        )  # Payload = status: Healthy
+-        # self.logger.debug("Liveness handler response: {}.".format(response))
++        response = xapp_rest.initResponse(status=200, response="Liveness")
++        response["payload"] = json.dumps({"status": "Healthy"})
+         return response
+ 
+     def readiness_handler(self, name: str, path: str, data: bytes, ctype: str):
+-        """
+-        Handler for the HTTP GET /ric/v1/health/ready request.
+-        """
+-        # self.logger.info("Received GET /ric/v1/health/ready request with content type {}.".format(ctype))
+         if self._ready:
+-            response = xapp_rest.initResponse(
+-                status=200, response="Readiness"  # Status = 200 OK
+-            )  # Initiating HTTP response
+-            response["payload"] = json.dumps(
+-                {"status": "Ready"}
+-            )  # Payload = status: Healthy
++            response = xapp_rest.initResponse(status=200, response="Readiness")
++            response["payload"] = json.dumps({"status": "Ready"})
+         else:
+-            response = xapp_rest.initResponse(
+-                status=503, response="Readiness"  # Status = 503 Service Unavailable
+-            )
++            response = xapp_rest.initResponse(status=503, response="Readiness")
+             response["payload"] = json.dumps({"status": "Not ready"})
+-        # self.logger.debug("Readiness handler response: {}.".format(response))
+         return response
+ 
+     # ------------------ SUBSCRIPTION REQUEST JSON
+ 
+-    # Hard coded as workaround for the wrong keys in the SubscriptionParams object
+-    def generate_subscription_request(
+-        self, inventory_name, subscription_transaction_id
+-    ):
++    def generate_subscription_request(self, inventory_name, subscription_transaction_id):
+         return {
+             "SubscriptionId": "",
+             "ClientEndpoint": {
+-                "Host": "service-ricxapp-xappnori-http.ricxapp",
++                "Host": "service-ricxapp-xappcmf-http.ricxapp",
+                 "HTTPPort": 8080,
+                 "RMRPort": 4560,
+             },
+-            "Meid": inventory_name,  # nobe B inventory_name
++            "Meid": inventory_name,
+             "RANFunctionID": 200,
+-            "E2SubscriptionDirectives": {  # Optional
+-                "E2TimeoutTimerValue": 2,  # Default = 2
+-                "E2RetryCount": 2,  # Default = 2
+-                "RMRRoutingNeeded": True,  # Default = True
++            "E2SubscriptionDirectives": {
++                "E2TimeoutTimerValue": 2,
++                "E2RetryCount": 2,
++                "RMRRoutingNeeded": True,
+             },
+-            "SubscriptionDetails": [  # Can make multiple subscriptions
++            "SubscriptionDetails": [
+                 {
+-                    "XappEventInstanceId": subscription_transaction_id,  # "Transaction id"
++                    "XappEventInstanceId": subscription_transaction_id,
+                     "EventTriggers": [],
+                     "ActionToBeSetupList": [
+                         {
+@@ -792,10 +517,24 @@
+                             "ActionDefinition": [],
+                             "SubsequentAction": {
+                                 "SubsequentActionType": "continue",
+-                                "TimeToWait": "w10ms",  # Default = "zero"
++                                "TimeToWait": "w10ms",
+                             },
+                         }
+                     ],
+                 }
+             ],
+         }
++
++
++def _parse_cell_id(cell_object_id: str):
++    # nori-cmf.cc names cells "NRCellDU_<id>".
++    try:
++        return int(cell_object_id.rsplit("_", 1)[1])
++    except (IndexError, ValueError):
++        return None
++
++
++def _iso_now() -> str:
++    return datetime.datetime.now(datetime.timezone.utc).strftime("%a %b %d %H:%M:%S.%f")[:-3] + " " + str(
++        datetime.datetime.now(datetime.timezone.utc).year
++    )
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/env.py xapp-CMF/src/env.py
+--- xapp-nori/src/env.py	2025-05-15 18:13:52.371470225 +0000
++++ xapp-CMF/src/env.py	1970-01-01 00:00:00.000000000 +0000
+@@ -1,246 +0,0 @@
+-import argparse
+-from pathlib import Path
+-
+-import numpy as np
+-from gymnasium import Env, spaces
+-from ray.rllib.algorithms.algorithm import Algorithm
+-from ray.rllib.env.policy_client import PolicyClient
+-import argparse
+-import os
+-from math import inf
+-from pathlib import Path
+-import ray
+-from ray import air, tune
+-from ray.rllib.algorithms.ppo import PPO
+-from ray.rllib.env.policy_server_input import PolicyServerInput
+-from ray.tune.registry import get_trainable_cls
+-import threading
+-from time import sleep
+-
+-
+-class MobNet(Env):
+-    def __init__(self, env_config=None, debug=False):
+-        super(MobNet, self).__init__()
+-        self.steps_per_episode = 1000
+-        self.curr_step = 0
+-        self.curr_ep = 0
+-        self.max_number_ep = 10
+-        self.action_space = spaces.Box(low=0.1, high=1, shape=(2,))
+-        self.observation_space = spaces.Box(
+-            low=0, high=np.inf, shape=(2,), dtype=np.float32
+-        )
+-
+-        self.slice_req = np.array([4, 1])
+-        self.debug = debug
+-
+-    def step(self, action):
+-        perc_action = np.floor((action / np.sum(action)) * 100)
+-        reward = self.calculate_reward(self.obs)
+-        terminated, truncated = False, False
+-        if self.debug:
+-            print(
+-                f"Episode: {self.curr_ep}, Step: {self.curr_step}, Reward: {reward} Action: {perc_action}, Obs: {self.obs}, Req: {self.slice_req}"
+-            )
+-        self.curr_step += 1
+-        if self.curr_step > self.steps_per_episode:
+-            terminated = truncated = True
+-            self.curr_ep += 1
+-
+-        return self.obs, reward, terminated, truncated, {}
+-
+-    def reset(self, seed=None, options=None):
+-        self.curr_step = 0
+-        if self.curr_ep > self.max_number_ep:
+-            self.curr_ep = 0
+-        return np.array([0, 0]), {}
+-
+-    def set_obs(self, obs):
+-        self.obs = obs
+-
+-    def calculate_reward(
+-        self,
+-        obs: np.ndarray,
+-    ) -> float:
+-        reward = 0.0
+-        under_thr = obs < self.slice_req
+-        if under_thr.any():
+-            reward -= np.mean(
+-                (self.slice_req[under_thr] - obs[under_thr]) / self.slice_req[under_thr]
+-            )
+-        assert isinstance(reward, float)
+-        return reward
+-
+-
+-def client_rl(test_mode: bool = False):
+-    SERVER_ADDRESS = "localhost"
+-    RAY_STORAGE = "./ray_results/"
+-    AGENT_NAME = "ppo"
+-    SERVER_BASE_PORT = 9900
+-    env = MobNet()
+-
+-    # Start a new episode.
+-    obs, info = env.reset()
+-
+-    if test_mode:  # Testing
+-        ray_storage = str(Path(RAY_STORAGE).resolve())
+-        analysis = tune.ExperimentAnalysis(f"{ray_storage}/{AGENT_NAME}/")
+-        assert analysis.trials is not None, "Analysis trial is None"
+-        last_checkpoint = analysis.get_last_checkpoint(analysis.trials[0])
+-        assert last_checkpoint is not None, "Last checkpoint is None"
+-        algo = Algorithm.from_checkpoint(last_checkpoint)
+-        while True:
+-            try:
+-                action = algo.compute_single_action(obs, explore=False)
+-                assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-                obs, reward, terminated, truncated, info = env.step(action)
+-                if terminated or truncated:
+-                    _, _ = env.reset()
+-            except KeyboardInterrupt:
+-                break
+-    else:  # Training
+-        client = PolicyClient(
+-            f"http://{SERVER_ADDRESS}:{SERVER_BASE_PORT}",
+-            inference_mode="local",
+-        )
+-        eid = client.start_episode(training_enabled=True)
+-        while True:
+-            try:
+-                action = client.get_action(eid, obs)
+-
+-                assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-                obs, reward, terminated, truncated, info = env.step(action)
+-
+-                # Log next-obs, rewards, and infos.
+-                client.log_returns(eid, reward, info=info)
+-
+-                # Reset the episode if done.
+-                if terminated or truncated:
+-                    client.end_episode(eid, obs)
+-                    obs, info = env.reset()
+-                    eid = client.start_episode(training_enabled=True)
+-            except KeyboardInterrupt:
+-                break
+-
+-
+-def server_rl():
+-    SERVER_ADDRESS = "localhost"
+-    SERVER_BASE_PORT = 9900
+-    RAY_STORAGE = "./ray_results/"
+-    AGENT_NAME = "oai_ppo"
+-    EPISODES_TOTAL = 100000
+-    DEBUG_MODE = False
+-    env = MobNet()
+-    ray_storage = str(Path(RAY_STORAGE).resolve())
+-    ray.init(local_mode=DEBUG_MODE)
+-
+-    def _input(ioctx):
+-        if ioctx.worker_index > 0 or ioctx.worker.num_workers == 0:
+-            return PolicyServerInput(
+-                ioctx,
+-                SERVER_ADDRESS,
+-                SERVER_BASE_PORT
+-                + ioctx.worker_index
+-                - (1 if ioctx.worker_index > 0 else 0),
+-            )
+-        else:
+-            return None
+-
+-    config = (
+-        get_trainable_cls("PPO")
+-        .get_default_config()
+-        .environment(
+-            env=None,
+-            observation_space=env.observation_space,
+-            action_space=env.action_space,
+-            is_atari=False,
+-        )
+-        .framework("torch")
+-        .offline_data(input_=_input)
+-        .rollouts(
+-            num_rollout_workers=0,
+-            enable_connectors=False,
+-        )
+-        .evaluation(off_policy_estimation_methods={})
+-        .debugging(log_level="INFO")
+-        .training(
+-            lr=0.0003,  # SB3 LR
+-            train_batch_size=256,  # SB3 n_steps
+-            sgd_minibatch_size=64,  # type: ignore SB3 batch_size
+-            num_sgd_iter=10,  # type: ignore SB3 n_epochs
+-            gamma=0.99,  # SB3 gamma
+-            lambda_=0.95,  # type: ignore # SB3 gae_lambda
+-            clip_param=0.2,  # type: ignore SB3 clip_range,
+-            vf_clip_param=np.inf,  # type: ignore SB3 equivalent to clip_range_vf=None
+-            use_gae=True,  # type: ignore SB3 normalize_advantage
+-            entropy_coeff=0.01,  # type: ignore SB3 ent_coef
+-            vf_loss_coeff=0.5,  # type: ignore SB3 vf_coef
+-            grad_clip=0.5,  # SB3 max_grad_norm TODO
+-            # kl_target=0.00001,  # SB3 target_kl
+-        )
+-        # .rl_module(_enable_rl_module_api=False)
+-        # .experimental(_enable_new_api_stack=False)
+-    )
+-
+-    config["model"]["fcnet_hiddens"] = [
+-        64,
+-        64,
+-    ]  # Set neural network size
+-
+-    config.experimental()
+-
+-    stop = {
+-        "episodes_total": EPISODES_TOTAL,
+-    }
+-
+-    # Restore the agent training in case of interruption or starts a new training
+-    if tune.Tuner.can_restore(f"{ray_storage}/{AGENT_NAME}/"):
+-        tuner = tune.Tuner.restore(
+-            f"{ray_storage}/{AGENT_NAME}/", trainable=PPO, param_space=config
+-        )
+-        results = tuner.fit()
+-    else:
+-        results = tune.Tuner(
+-            "PPO",
+-            param_space=config,
+-            run_config=air.RunConfig(
+-                stop=stop,
+-                verbose=2,
+-                storage_path=ray_storage,
+-                name=AGENT_NAME,
+-                checkpoint_config=air.CheckpointConfig(
+-                    checkpoint_frequency=1,
+-                    checkpoint_at_end=True,
+-                ),
+-            ),
+-        ).fit()
+-
+-
+-# Example usage
+-if __name__ == "__main__":
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument(
+-        "--client",
+-        action="store_true",
+-    )
+-    parser.add_argument(
+-        "--test",
+-        action="store_true",
+-    )
+-    parser.add_argument(
+-        "--server",
+-        action="store_true",
+-    )
+-    args = parser.parse_args()
+-    if args.client:
+-        client_rl(test_mode=args.test)
+-    elif args.server:
+-        server_rl()
+-    else:
+-        server_thread = threading.Thread(target=server_rl)
+-        server_thread.start()
+-        sleep(10)
+-        client_rl()
+-        # Reverse
+-        # client_thread = threading.Thread(target=client_rl)
+-        # client_thread.start()
+-        # server_rl()
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/main.py xapp-CMF/src/main.py
+--- xapp-nori/src/main.py	2025-05-15 18:13:52.371470225 +0000
++++ xapp-CMF/src/main.py	2026-08-19 15:20:58.198865161 +0000
+@@ -1,11 +1,11 @@
+ # Imports from local files
+-from .custom_xapp import XappNori
++from .custom_xapp import XappCmf
+ 
+ def launchXapp():
+     """
+     Entrypoint called in the xApp Dockerfile.
+     """
+-    xapp_instance = XappNori() # Instantiating our custom xApp 
++    xapp_instance = XappCmf() # Instantiating our custom xApp
+     xapp_instance.start() # Starting our custom xApp in threaded mode
+ 
+ if __name__ == "__main__":
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/pmon.py xapp-CMF/src/pmon.py
+--- xapp-nori/src/pmon.py	1970-01-01 00:00:00.000000000 +0000
++++ xapp-CMF/src/pmon.py	2026-08-19 15:20:33.442458183 +0000
+@@ -0,0 +1,74 @@
++# Performance Monitoring (PMon) component, feeding Implicit Conflict
++# Detection (ImCD).
++#
++# Implements Section III-D of "Conflict Mitigation Framework and Conflict
++# Detection in O-RAN Near-RT RIC" (Adamczyk & Kliks, IEEE ComMag 2023).
++# Unlike DCD/ICD, implicit conflicts cannot be anticipated pre-action: PMon
++# watches a RAN KPI (mean UE satisfaction per cell, computed by nori-cmf.cc
++# and reported as the QoS.MeanUeSatisfactionPermille KPM item) and only finds
++# out about a problem once it has already happened. When a significant drop
++# is observed, ImCD correlates it against the CD Agent's own record of which
++# xApps recently changed which parameters on that cell (reusing the same
++# database DCD/ICD already maintain, exactly as the paper describes: "ImCD
++# utilizes the data captured in the Database by DCD and ICD, so it does not
++# need to monitor any control messages by itself"). A per-(cell, source-set)
++# counter is incremented on every correlated occurrence, and once it breaches
++# a threshold the implicit conflict is reported.
++
++from typing import Callable, Dict, FrozenSet, Optional, Set
++
++from .cd_agent import ConflictDetectionAgent
++
++
++class PerformanceMonitor:
++    def __init__(
++        self,
++        cd_agent: ConflictDetectionAgent,
++        degradation_threshold: float = 0.02,
++        occurrence_threshold: int = 3,
++        report_callback: Optional[Callable[[int, Set[str]], None]] = None,
++    ):
++        """
++        degradation_threshold: relative drop in the monitored KPI, compared to
++            its previous sample for the same cell, that counts as "degraded".
++        occurrence_threshold: number of correlated degradation occurrences
++            for the same (cell, set-of-xApps) before an implicit conflict is
++            actually reported - a single bad sample is noise, not a conflict.
++        report_callback: called as report_callback(cell_id, sources) once the
++            threshold is breached.
++        """
++        self.cd_agent = cd_agent
++        self.degradation_threshold = degradation_threshold
++        self.occurrence_threshold = occurrence_threshold
++        self.report_callback = report_callback
++        self._last_kpi: Dict[int, float] = {}
++        self._occurrences: Dict[FrozenSet, int] = {}
++
++    def observe(self, cell_id: int, kpi_value: float, timestamp: float) -> None:
++        """
++        Feeds one new KPI sample for a cell (mean UE satisfaction, in [0, 1]).
++        """
++        previous = self._last_kpi.get(cell_id)
++        self._last_kpi[cell_id] = kpi_value
++        if previous is None or previous <= 0.0:
++            return
++
++        drop = (previous - kpi_value) / previous
++        if drop <= self.degradation_threshold:
++            return
++
++        # KPI degradation detected for this cell (ImCD1/PMon "Analyse PM data").
++        records = self.cd_agent.active_records(cell_id, timestamp)
++        sources = {r.source for r in records}
++        if len(sources) < 2:
++            return  # nothing to correlate the degradation with
++
++        key = (cell_id, frozenset(sources))
++        self._occurrences[key] = self._occurrences.get(key, 0) + 1
++        if self._occurrences[key] >= self.occurrence_threshold:
++            if self.report_callback is not None:
++                self.report_callback(cell_id, sources)
++            # "the CD Agent may remove data about RAN KPI degradation
++            # occurrences ... related to the reported conflict from the
++            # Database" once it has been reported.
++            del self._occurrences[key]
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/src/requirements.txt xapp-CMF/src/requirements.txt
+--- xapp-nori/src/requirements.txt	2025-05-15 18:13:52.371470225 +0000
++++ xapp-CMF/src/requirements.txt	2026-08-19 15:22:48.432689146 +0000
+@@ -1,100 +1 @@
+-absl-py==2.2.2
+-aiosignal==1.3.2
+-async-timeout==5.0.1
+-attrs==25.3.0
+-cachetools==5.5.2
+-certifi==2025.1.31
+-charset-normalizer==3.4.1
+-click==8.1.8
+-cloudpickle==3.1.1
+-dm-tree==0.1.9
+-Farama-Notifications==0.0.4
+-filelock==3.18.0
+-frozenlist==1.6.0
+-fsspec==2025.3.2
+-google-api-core==2.24.2
+-google-api-python-client==2.167.0
+-google-auth==2.39.0
+-google-auth-httplib2==0.2.0
+-googleapis-common-protos==1.70.0
+-grpcio==1.71.0
+-gymnasium==0.28.1
+-hiredis==2.0.0
+-httplib2==0.22.0
+-idna==3.10
+-imageio==2.37.0
+ influxdb-client==1.48.0
+-inotify==0.2.10
+-inotify-simple==1.3.5
+-jax-jumpy==1.0.0
+-Jinja2==3.1.6
+-jsonschema==4.23.0
+-jsonschema-specifications==2024.10.1
+-lazy_loader==0.4
+-logger==1.4
+-lz4==4.4.4
+-Markdown==3.8
+-markdown-it-py==3.0.0
+-MarkupSafe==3.0.2
+-mdclogpy==1.1.4
+-mdurl==0.1.2
+-mpmath==1.3.0
+-msgpack==1.1.0
+-networkx==3.4.2
+-nose==1.3.7
+-numpy==1.26.4
+-nvidia-cublas-cu12==12.4.5.8
+-nvidia-cuda-cupti-cu12==12.4.127
+-nvidia-cuda-nvrtc-cu12==12.4.127
+-nvidia-cuda-runtime-cu12==12.4.127
+-nvidia-cudnn-cu12==9.1.0.70
+-nvidia-cufft-cu12==11.2.1.3
+-nvidia-curand-cu12==10.3.5.147
+-nvidia-cusolver-cu12==11.6.1.9
+-nvidia-cusparse-cu12==12.3.1.170
+-nvidia-cusparselt-cu12==0.6.2
+-nvidia-nccl-cu12==2.21.5
+-nvidia-nvjitlink-cu12==12.4.127
+-nvidia-nvtx-cu12==12.4.127
+-packaging==25.0
+-pandas==2.2.3
+-pillow==11.2.1
+-proto-plus==1.26.1
+-protobuf==3.20.3
+-pyarrow==19.0.1
+-pyasn1==0.6.1
+-pyasn1_modules==0.4.2
+-pycrate==0.7.8
+-Pygments==2.19.1
+-pyparsing==3.2.3
+-python-dateutil==2.9.0.post0
+-pytz==2025.2
+-PyYAML==6.0.2
+-ray==2.9.3
+-reactivex==4.0.4
+-redis==4.3.6
+-referencing==0.36.2
+-requests==2.32.3
+-rich==14.0.0
+-ricsdl==3.1.3
+-rpds-py==0.24.0
+-rsa==4.9.1
+-scikit-image==0.25.2
+-scipy==1.15.2
+-shellingham==1.5.4
+-six==1.17.0
+-sympy==1.13.1
+-tensorboard==2.19.0
+-tensorboard-data-server==0.7.2
+-tensorboardX==2.6.2.2
+-tifffile==2025.3.30
+-torch==2.6.0
+-torch-tb-profiler==0.4.3
+-triton==3.2.0
+-typer==0.15.2
+-typing_extensions==4.13.2
+-tzdata==2025.2
+-uritemplate==4.1.1
+-urllib3==2.4.0
+-Werkzeug==3.1.3
+-wrapt==1.17.2
+\ No newline at end of file
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=*.pyc' xapp-nori/update_xapp.sh xapp-CMF/update_xapp.sh
+--- xapp-nori/update_xapp.sh	2025-05-15 18:13:52.371470225 +0000
++++ xapp-CMF/update_xapp.sh	2026-08-19 15:23:00.176884502 +0000
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappcmf"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"

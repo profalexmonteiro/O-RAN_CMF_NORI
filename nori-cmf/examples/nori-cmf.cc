@@ -5,18 +5,26 @@
 /**
  * @ingroup examples
  * @file nori-cmf.cc
- * @brief O-RAN Conflict Mitigation Framework (CMF) scenario.
+ * @brief O-RAN network scenario with conflicting MRO/MLB handover control.
  *
- * System-level reimplementation of the scenario documented in
+ * System-level reimplementation of the *scenario* documented in
  * https://github.com/czezy/O-RAN_CMF_CM2023 (Conflict Mitigation Framework and
  * Conflict Detection in O-RAN nRT-RIC, IEEE ComMag 2023). That repository ships
- * the scenario description, the ICD/DCD/ImCD JSON message formats and the raw
- * result files, but no source code, so the model below is rebuilt from the
- * written specification and calibrated against the published CSV results (see
- * "Calibration" notes next to each constant).
+ * the scenario description and the raw result files, but no source code, so
+ * the model below is rebuilt from the written specification and calibrated
+ * against the published CSV results (see "Calibration" notes next to each
+ * constant).
  *
- * Two xApps run simultaneously and fight over the handover boundary of every
- * cell:
+ * This file is deliberately *only* the RAN + E2 side of that paper's setup.
+ * The Conflict Mitigation Framework (CD Agent / CR Agent / PMon) is **not**
+ * implemented here: it lives in the `xapp-CMF` xApp, running on the Near-RT
+ * RIC, exactly as the paper places it. This example has no notion of
+ * "conflict" at all — it is a faithful RAN + E2 node simulator that applies
+ * whatever RIC Control Request it receives, from whichever xApp sent it,
+ * unconditionally.
+ *
+ * Two xApps normally run against this scenario and fight over the handover
+ * boundary of every cell:
  *   - MRO (Mobility Robustness Optimization) writes Hysteresis and
  *     Time-To-Trigger, driven by the ping-pong and radio-link-failure ratios;
  *   - MLB (Mobility Load Balancing) writes the Cell Individual Offset, driven
@@ -24,25 +32,24 @@
  *
  * Because HOMeasurementOffset (CIO), HOHysteresis and HOTimeToTrigger all
  * belong to the "CellAffectHandoverBoundary" parameter group, simultaneous
- * decisions from the two xApps are an *indirect* conflict in the CMF taxonomy.
- * The framework is exercised in the three modes of the paper, selected with
- * --cmMode:
- *   - none     : conflicts are neither detected nor mitigated;
- *   - prioMRO  : on conflict the MRO decision wins and MLB's is dropped;
- *   - prioMLB  : on conflict the MLB decision wins and MRO's is dropped.
+ * decisions from the two xApps are an *indirect* conflict in the CMF taxonomy
+ * — it is `xapp-CMF`'s job, not this file's, to detect and mitigate that.
  *
  * Every cell is a real E2 node: an ns3::E2Termination is created per base
  * station and connects to the Near-RT RIC given by --ipE2TermRic, registering
  * the KPM (RAN function 200) and RIC Control (RAN function 300) service
- * models. Cell KPIs are streamed to the RIC as KPM indications, and RIC Control
- * requests coming from real xApps are decoded and applied to the cell. When no
- * xApp on the RIC drives a given parameter, the built-in MRO/MLB emulation
- * keeps the control loop running so that the scenario is reproducible offline
- * (--useE2=0), which is also how the CSV results are generated.
+ * models. Cell KPIs are streamed to the RIC as KPM indications, and RIC
+ * Control requests coming from real xApps are decoded and applied to the cell
+ * as-is. When no xApp on the RIC drives a given parameter, a built-in
+ * MRO/MLB *emulation* (not a conflict-mitigation mechanism — just a stand-in
+ * for the real xApps) keeps the control loop running so that the scenario is
+ * reproducible offline (--useE2=0), which is also how the CSV results are
+ * generated. Because there is no CMF here, running with --useE2=0 always
+ * behaves like the paper's "CM disabled" baseline.
  *
  * Usage:
- *   ./ns3 run "nori-cmf -- --ipE2TermRic=10.244.0.108 --cmMode=prioMRO"
- *   ./ns3 run "nori-cmf -- --useE2=0 --cmMode=none --simTime=1000"
+ *   ./ns3 run "nori-cmf -- --ipE2TermRic=10.244.0.108"
+ *   ./ns3 run "nori-cmf -- --useE2=0 --simTime=1000"
  */
 
 #include "ns3/core-module.h"
@@ -93,14 +100,6 @@ constexpr long RAN_FUNCTION_RC = 300;
 // Configuration
 // ===========================================================================
 
-/// Conflict mitigation mode, matching the three result sets of the paper.
-enum class CmMode
-{
-    None,    //!< "no_CM"
-    PrioMro, //!< "prio_MRO"
-    PrioMlb  //!< "prio_MLB"
-};
-
 /// RAN parameters the two xApps compete for.
 enum class RanParameter
 {
@@ -108,21 +107,6 @@ enum class RanParameter
     Hysteresis,   //!< HOHysteresis, written by MRO
     TimeToTrigger //!< HOTimeToTrigger, written by MRO
 };
-
-std::string
-ParameterName(RanParameter p)
-{
-    switch (p)
-    {
-    case RanParameter::Cio:
-        return "HOMeasurementOffset";
-    case RanParameter::Hysteresis:
-        return "HOHysteresis";
-    case RanParameter::TimeToTrigger:
-        return "HOTimeToTrigger";
-    }
-    return "Unknown";
-}
 
 struct CmfConfig
 {
@@ -134,7 +118,6 @@ struct CmfConfig
     double warmupTime{150.0};  //!< discarded from the final averages [s]
     uint32_t rngSeed{1};
     uint32_t rngRun{1};
-    CmMode cmMode{CmMode::None};
     std::string outputDir{"cmf-output"};
 
     // --- deployment ---
@@ -210,10 +193,6 @@ struct CmfConfig
     double rlfSinrThresholdDb{-18.0};
     double rlfTimer{1.0};             //!< time below the threshold before an RLF [s]
     uint32_t admissionCandidates{3};  //!< cells tried before declaring a blockade
-
-    // --- conflict mitigation framework ---
-    double controlTimespanMs{500.0};  //!< validity window of a decision, as in the ICD messages
-    double imcdDegradationThreshold{0.02}; //!< relative KPI drop flagged by the ImCD
 
     // --- E2 / Near-RT RIC ---
     bool useE2{true};
@@ -332,79 +311,18 @@ LoadToCio(double load)
 }
 
 // ===========================================================================
-// CMF data model
+// Control decision
 // ===========================================================================
 
 /// A single xApp control decision, i.e. the payload of an E2 Control message.
+/// Conflict detection/mitigation is not this file's job (see xapp-CMF); a
+/// decision here is applied unconditionally, whoever it came from.
 struct ControlDecision
 {
-    std::string source;       //!< originating xApp
-    uint32_t cellId{0};       //!< target cell
+    uint32_t cellId{0}; //!< target cell
     RanParameter parameter{RanParameter::Cio};
     double value{0.0};
-    double timestamp{0.0};    //!< simulated time the decision was issued [s]
-    double controlTimespanMs{500.0};
 };
-
-/// Parameter groups of the ICD, extended with the two MRO parameters. Two xApps
-/// writing different members of the same group are an indirect conflict.
-const std::map<std::string, std::set<RanParameter>> PARAMETER_GROUPS = {
-    {"CellAffectHandoverBoundary",
-     {RanParameter::Cio, RanParameter::Hysteresis, RanParameter::TimeToTrigger}}};
-
-std::string
-GroupOf(RanParameter p)
-{
-    for (const auto& [name, members] : PARAMETER_GROUPS)
-    {
-        if (members.count(p) > 0)
-        {
-            return name;
-        }
-    }
-    return "";
-}
-
-/// Formats a cell id the way the reference JSON messages do.
-std::string
-FormatCellId(uint32_t cellId)
-{
-    std::ostringstream os;
-    os << "000-000-000-" << std::setw(6) << std::setfill('0') << cellId;
-    return os.str();
-}
-
-/// Wall-clock-looking timestamp, e.g. "Wed Jan 01 00:00:00.000 2020".
-std::string
-FormatTimestamp(double simTimeSec, std::time_t epoch)
-{
-    const double whole = std::floor(simTimeSec);
-    std::time_t t = epoch + static_cast<std::time_t>(whole);
-    int ms = static_cast<int>(std::llround((simTimeSec - whole) * 1000.0));
-    if (ms > 999)
-    {
-        ms = 999;
-    }
-    std::tm tmv{};
-    gmtime_r(&t, &tmv);
-    char date[64];
-    std::strftime(date, sizeof(date), "%a %b %d %H:%M:%S", &tmv);
-    char out[96];
-    std::snprintf(out, sizeof(out), "%s.%03d %d", date, ms, 1900 + tmv.tm_year);
-    return std::string(out);
-}
-
-/// Serialises a decision as the "content" object of the reference messages.
-std::string
-DecisionToJson(const ControlDecision& d, std::time_t epoch)
-{
-    std::ostringstream os;
-    os << "{\"source\":\"" << d.source << "\",\"command\":\"Modify\",\"targetParameter\":\""
-       << ParameterName(d.parameter) << "\",\"targetValue\":\"" << d.value << "\",\"targetCell\":\""
-       << FormatCellId(d.cellId) << "\",\"timestamp\":\"" << FormatTimestamp(d.timestamp, epoch)
-       << "\",\"controlTimespan\":\"" << static_cast<long>(d.controlTimespanMs) << "\"}";
-    return os.str();
-}
 
 // ===========================================================================
 // Geometry helpers
@@ -560,14 +478,7 @@ class CmfSimulation
 
     // --- control loop ---
     void RunXapps();
-    std::vector<ControlDecision> DetectAndMitigate(std::vector<ControlDecision> pending);
     void ApplyDecision(const ControlDecision& d);
-    void ReportConflict(const std::string& detector,
-                        const std::string& conflictType,
-                        const std::string& groupName,
-                        const std::vector<ControlDecision>& decisions);
-    void ReportImplicitConflict(const std::string& kpiName,
-                                const std::vector<ControlDecision>& decisions);
 
     // --- reporting ---
     void CollectKpis();
@@ -622,7 +533,6 @@ class CmfSimulation
     std::ofstream m_rlfFile;
     std::ofstream m_hoFile;
     std::ofstream m_ppFile;
-    std::ofstream m_conflictFile;
     std::vector<std::ofstream> m_bsFiles;
 
     // Aggregate counters.
@@ -630,10 +540,6 @@ class CmfSimulation
     uint64_t m_handovers{0};
     uint64_t m_pingPongs{0};
     uint64_t m_rlfs{0};
-    uint64_t m_directConflicts{0};
-    uint64_t m_indirectConflicts{0};
-    uint64_t m_implicitConflicts{0};
-    uint64_t m_droppedDecisions{0};
 
     // Post-warmup accumulators.
     double m_availAcc{0.0};
@@ -646,12 +552,6 @@ class CmfSimulation
     uint64_t m_hoAfterWarmup{0};
     uint64_t m_ppAfterWarmup{0};
     uint64_t m_rlfAfterWarmup{0};
-
-    // ImCD state.
-    double m_lastSatisfaction{std::numeric_limits<double>::quiet_NaN()};
-    std::vector<ControlDecision> m_lastRoundDecisions;
-
-    std::time_t m_epoch{0};
 };
 
 CmfSimulation::CmfSimulation(const CmfConfig& cfg)
@@ -669,13 +569,6 @@ CmfSimulation::CmfSimulation(const CmfConfig& cfg)
     m_durationRv->SetAttribute(
         "Variance",
         DoubleValue(m_cfg.connectionDurationStd * m_cfg.connectionDurationStd));
-
-    // Fixed epoch so that the JSON timestamps are reproducible: 2020-01-01 UTC.
-    std::tm tmv{};
-    tmv.tm_year = 120;
-    tmv.tm_mon = 0;
-    tmv.tm_mday = 1;
-    m_epoch = timegm(&tmv);
 }
 
 // ---------------------------------------------------------------------------
@@ -828,9 +721,6 @@ CmfSimulation::OpenTraceFiles()
     open(m_rlfFile, "rlf.csv", "time,current bs,user,conn_sinr,x pos,y pos");
     open(m_hoFile, "ho.csv", "time,previous bs,current bs,user,conn_sinr,x pos,y pos");
     open(m_ppFile, "pp.csv", "time,current bs,user,conn_sinr,x pos,y pos,ho pp time");
-
-    m_conflictFile.open(prefix + "conflicts.json");
-    NS_ABORT_MSG_IF(!m_conflictFile.is_open(), "Cannot open the conflict log");
 
     m_bsFiles.resize(N_BS);
     for (uint32_t b = 0; b < N_BS; ++b)
@@ -1365,15 +1255,19 @@ CmfSimulation::Step()
 }
 
 // ---------------------------------------------------------------------------
-// xApps and the Conflict Mitigation Framework
+// xApp emulation (stand-in for the real MRO/MLB xApps in offline runs)
 // ---------------------------------------------------------------------------
 
 void
 CmfSimulation::RunXapps()
 {
     const double now = Now();
-    std::vector<ControlDecision> pending;
 
+    // No conflict detection/mitigation here: every decision below is applied
+    // unconditionally, exactly like a real RIC Control Request coming from a
+    // real xApp is in RicControlCallback()/ApplyRicDecision(). Detecting and
+    // mitigating conflicting decisions is xapp-CMF's job, upstream of this
+    // simulator; see contrib/nori/docs/nori-cmf.md.
     for (BaseStation& bs : m_bs)
     {
         PruneWindow(bs.hoWindow, now);
@@ -1390,8 +1284,7 @@ CmfSimulation::RunXapps()
             const double h = RlfRatioToHysteresis(std::min(1.0, rlfRatio));
             if (std::abs(h - bs.hysteresis) > 1e-9)
             {
-                pending.push_back({"MRO", bs.id, RanParameter::Hysteresis, h, now,
-                                   m_cfg.controlTimespanMs});
+                ApplyDecision({bs.id, RanParameter::Hysteresis, h});
             }
         }
         if (bs.ricOwned.count(RanParameter::TimeToTrigger) == 0)
@@ -1399,8 +1292,7 @@ CmfSimulation::RunXapps()
             const double t = PingPongRatioToTtt(std::min(1.0, ppRatio));
             if (std::abs(t - bs.ttt) > 1e-9)
             {
-                pending.push_back({"MRO", bs.id, RanParameter::TimeToTrigger, t, now,
-                                   m_cfg.controlTimespanMs});
+                ApplyDecision({bs.id, RanParameter::TimeToTrigger, t});
             }
         }
 
@@ -1410,108 +1302,15 @@ CmfSimulation::RunXapps()
             const double c = LoadToCio(bs.Load());
             if (std::abs(c - bs.cio) > 1e-9)
             {
-                pending.push_back(
-                    {"MLB", bs.id, RanParameter::Cio, c, now, m_cfg.controlTimespanMs});
+                ApplyDecision({bs.id, RanParameter::Cio, c});
             }
         }
     }
-
-    const std::vector<ControlDecision> accepted = DetectAndMitigate(std::move(pending));
-    for (const ControlDecision& d : accepted)
-    {
-        ApplyDecision(d);
-    }
-    m_lastRoundDecisions = accepted;
 
     if (now + m_cfg.controlPeriod <= m_cfg.simTime + 1e-9)
     {
         Simulator::Schedule(Seconds(m_cfg.controlPeriod), &CmfSimulation::RunXapps, this);
     }
-}
-
-std::vector<ControlDecision>
-CmfSimulation::DetectAndMitigate(std::vector<ControlDecision> pending)
-{
-    // Group the decisions of this control round per target cell.
-    std::map<uint32_t, std::vector<size_t>> byCell;
-    for (size_t i = 0; i < pending.size(); ++i)
-    {
-        byCell[pending[i].cellId].push_back(i);
-    }
-
-    std::vector<bool> dropped(pending.size(), false);
-
-    for (const auto& [cellId, idxs] : byCell)
-    {
-        for (size_t a = 0; a < idxs.size(); ++a)
-        {
-            for (size_t b = a + 1; b < idxs.size(); ++b)
-            {
-                const ControlDecision& da = pending[idxs[a]];
-                const ControlDecision& db = pending[idxs[b]];
-                if (da.source == db.source)
-                {
-                    continue;
-                }
-
-                // DCD: two xApps writing the same parameter of the same cell.
-                if (da.parameter == db.parameter)
-                {
-                    m_directConflicts++;
-                    ReportConflict("DCD", "direct", "", {da, db});
-                }
-                // ICD: two xApps writing different parameters of one group.
-                else if (!GroupOf(da.parameter).empty() &&
-                         GroupOf(da.parameter) == GroupOf(db.parameter))
-                {
-                    m_indirectConflicts++;
-                    ReportConflict("ICD", "indirect", GroupOf(da.parameter), {da, db});
-                }
-                else
-                {
-                    continue;
-                }
-
-                // Mitigation: the prioritised xApp keeps its decision.
-                if (m_cfg.cmMode == CmMode::PrioMro)
-                {
-                    if (da.source != "MRO")
-                    {
-                        dropped[idxs[a]] = true;
-                    }
-                    if (db.source != "MRO")
-                    {
-                        dropped[idxs[b]] = true;
-                    }
-                }
-                else if (m_cfg.cmMode == CmMode::PrioMlb)
-                {
-                    if (da.source != "MLB")
-                    {
-                        dropped[idxs[a]] = true;
-                    }
-                    if (db.source != "MLB")
-                    {
-                        dropped[idxs[b]] = true;
-                    }
-                }
-                // CmMode::None: detected for the record, nothing is mitigated.
-            }
-        }
-    }
-
-    std::vector<ControlDecision> accepted;
-    accepted.reserve(pending.size());
-    for (size_t i = 0; i < pending.size(); ++i)
-    {
-        if (dropped[i] && m_cfg.cmMode != CmMode::None)
-        {
-            m_droppedDecisions++;
-            continue;
-        }
-        accepted.push_back(pending[i]);
-    }
-    return accepted;
 }
 
 void
@@ -1544,47 +1343,6 @@ CmfSimulation::ApplyDecision(const ControlDecision& d)
         bs->ttt = d.value;
         break;
     }
-}
-
-void
-CmfSimulation::ReportConflict(const std::string& detector,
-                              const std::string& conflictType,
-                              const std::string& groupName,
-                              const std::vector<ControlDecision>& decisions)
-{
-    // Same shape as json_messages/{DCD,ICD}/*signal conflict.json.
-    std::ostringstream os;
-    os << "{\"source\":\"" << detector << "\",\"command\":\"Notify\",\"conflictType\":\""
-       << conflictType << "\",\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch) << "\"";
-    if (!groupName.empty())
-    {
-        os << ",\"groupName\":\"" << groupName << "\"";
-    }
-    os << ",\"decisions\":[";
-    for (size_t i = 0; i < decisions.size(); ++i)
-    {
-        os << (i ? "," : "") << "{\"content\":" << DecisionToJson(decisions[i], m_epoch) << "}";
-    }
-    os << "]}";
-    m_conflictFile << os.str() << "\n";
-}
-
-void
-CmfSimulation::ReportImplicitConflict(const std::string& kpiName,
-                                      const std::vector<ControlDecision>& decisions)
-{
-    // Same shape as json_messages/ImCD/ImCD 9 signal conflict.json.
-    std::ostringstream os;
-    os << "{\"source\":\"ImCD\",\"command\":\"Notify\",\"conflictType\":\"implicit\""
-       << ",\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch) << "\",\"degradKPI\":\"" << kpiName
-       << "\",\"degradOccurrences\":[{\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch)
-       << "\",\"decisions\":[";
-    for (size_t i = 0; i < decisions.size(); ++i)
-    {
-        os << (i ? "," : "") << DecisionToJson(decisions[i], m_epoch);
-    }
-    os << "]}]}";
-    m_conflictFile << os.str() << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,33 +1400,6 @@ CmfSimulation::CollectKpis()
                      << bs.hysteresis << "," << bs.ttt << "\n";
     }
 
-    // ImCD: a drop of the monitored KPI right after a round in which more than
-    // one xApp acted on the same cell is reported as an implicit conflict.
-    if (!std::isnan(meanSatis) && !std::isnan(m_lastSatisfaction) &&
-        m_lastSatisfaction > 0.0 &&
-        (m_lastSatisfaction - meanSatis) / m_lastSatisfaction > m_cfg.imcdDegradationThreshold)
-    {
-        std::map<uint32_t, std::set<std::string>> sourcesPerCell;
-        for (const ControlDecision& d : m_lastRoundDecisions)
-        {
-            sourcesPerCell[d.cellId].insert(d.source);
-        }
-        std::vector<ControlDecision> culprits;
-        for (const ControlDecision& d : m_lastRoundDecisions)
-        {
-            if (sourcesPerCell[d.cellId].size() > 1)
-            {
-                culprits.push_back(d);
-            }
-        }
-        if (!culprits.empty())
-        {
-            m_implicitConflicts++;
-            ReportImplicitConflict("MeanUeSatisfaction", culprits);
-        }
-    }
-    m_lastSatisfaction = meanSatis;
-
     if (now >= m_cfg.warmupTime)
     {
         m_availAcc += meanAvail;
@@ -1694,13 +1425,8 @@ CmfSimulation::CollectKpis()
 void
 CmfSimulation::WriteSummary()
 {
-    const char* modeName = m_cfg.cmMode == CmMode::None
-                               ? "no_CM"
-                               : (m_cfg.cmMode == CmMode::PrioMro ? "prio_MRO" : "prio_MLB");
-
     std::ostringstream os;
     os << "\n==================== NORI CMF summary ====================\n"
-       << "CM mode                     : " << modeName << "\n"
        << "Simulated time              : " << m_cfg.simTime << " s (warm-up " << m_cfg.warmupTime
        << " s discarded)\n"
        << "Base stations / users       : " << N_BS << " / " << m_cfg.nUe << "\n"
@@ -1715,11 +1441,6 @@ CmfSimulation::WriteSummary()
        << "Ping-pong handovers         : " << m_ppAfterWarmup << "\n"
        << "Radio link failures         : " << m_rlfAfterWarmup << "\n"
        << "Call blockades              : " << m_cbAfterWarmup << "\n"
-       << "----------------------------------------------------------\n"
-       << "Direct conflicts (DCD)      : " << m_directConflicts << "\n"
-       << "Indirect conflicts (ICD)    : " << m_indirectConflicts << "\n"
-       << "Implicit conflicts (ImCD)   : " << m_implicitConflicts << "\n"
-       << "Decisions dropped by the CMF: " << m_droppedDecisions << "\n"
        << "==========================================================\n";
 
     std::cout << os.str();
@@ -1871,23 +1592,18 @@ CmfSimulation::RicControlCallback(uint32_t bsIdx, E2AP_PDU_t* pdu)
 
         ControlDecision d;
         d.cellId = m_bs[bsIdx].id;
-        d.timestamp = Simulator::Now().GetSeconds();
-        d.controlTimespanMs = m_cfg.controlTimespanMs;
         d.value = item.m_valueInt / 1000.0;
 
         switch (item.m_id)
         {
         case 1:
             d.parameter = RanParameter::Cio;
-            d.source = "xApp-MLB";
             break;
         case 2:
             d.parameter = RanParameter::Hysteresis;
-            d.source = "xApp-MRO";
             break;
         case 3:
             d.parameter = RanParameter::TimeToTrigger;
-            d.source = "xApp-MRO";
             break;
         default:
             NS_LOG_WARN("Unknown RAN parameter id " << item.m_id);
@@ -1908,6 +1624,9 @@ CmfSimulation::ApplyRicDecision(ControlDecision d)
 {
     // A real xApp on the RIC now owns this parameter: the built-in emulation
     // stops writing it so that the two control loops do not fight each other.
+    // The decision itself is applied unconditionally: it already went through
+    // xapp-CMF's conflict detection/mitigation before it was ever sent as a
+    // RIC Control Request, so there is nothing left to arbitrate here.
     for (BaseStation& bs : m_bs)
     {
         if (bs.id == d.cellId)
@@ -1916,11 +1635,7 @@ CmfSimulation::ApplyRicDecision(ControlDecision d)
             break;
         }
     }
-    const std::vector<ControlDecision> accepted = DetectAndMitigate({d});
-    for (const ControlDecision& a : accepted)
-    {
-        ApplyDecision(a);
-    }
+    ApplyDecision(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -1940,7 +1655,6 @@ int
 main(int argc, char* argv[])
 {
     CmfConfig cfg;
-    std::string cmModeStr = "none";
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTime", "Total simulated time in seconds", cfg.simTime);
@@ -1948,7 +1662,6 @@ main(int argc, char* argv[])
     cmd.AddValue("kpiPeriod", "KPI polling period in seconds", cfg.kpiPeriod);
     cmd.AddValue("controlPeriod", "xApp decision period in seconds", cfg.controlPeriod);
     cmd.AddValue("warmupTime", "Initial time discarded from the averages", cfg.warmupTime);
-    cmd.AddValue("cmMode", "Conflict mitigation mode: none, prioMRO or prioMLB", cmModeStr);
     cmd.AddValue("nUe", "Number of user equipments", cfg.nUe);
     cmd.AddValue("isd", "Inter-site distance in meters", cfg.isd);
     cmd.AddValue("rxSensitivity", "UE receiver sensitivity in dBm", cfg.rxSensitivityDbm);
@@ -1964,23 +1677,6 @@ main(int argc, char* argv[])
     cmd.AddValue("ipE2TermRic", "IP address of the RIC E2 termination", cfg.ricIp);
     cmd.AddValue("e2Periodicity", "KPM indication period in seconds", cfg.e2Periodicity);
     cmd.Parse(argc, argv);
-
-    if (cmModeStr == "none")
-    {
-        cfg.cmMode = CmMode::None;
-    }
-    else if (cmModeStr == "prioMRO")
-    {
-        cfg.cmMode = CmMode::PrioMro;
-    }
-    else if (cmModeStr == "prioMLB")
-    {
-        cfg.cmMode = CmMode::PrioMlb;
-    }
-    else
-    {
-        NS_ABORT_MSG("Unknown cmMode '" << cmModeStr << "', use none, prioMRO or prioMLB");
-    }
 
     if (cfg.warmupTime >= cfg.simTime)
     {
