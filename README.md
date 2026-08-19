@@ -2,19 +2,11 @@
 
 **Conflict Mitigation Framework (CMF) for O-RAN, on top of NORI/ns-3.**
 
-<<<<<<< HEAD
 Este repositório reúne, em um único lugar, tudo o que é necessário para reproduzir o cenário de conflito entre xApps descrito em [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023) e no artigo [Adamczyk & Kliks, *"Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"*, IEEE ComMag 2023](https://arxiv.org/abs/2305.07117), usando o módulo [NORI](https://github.com/lasseufpa/nori) do ns-3:
 
 - uma simulação ns-3 (`nori-cmf.cc`) com 19 estações-base e 380 usuários, conectada de verdade a um Near-RT RIC via E2 — **sem** nenhuma lógica de conflito embutida, só o cenário de RAN;
 - dois xApps OSC que competem pelo controle da fronteira de handover de cada célula — **MRO** (Mobility Robustness Optimization) e **MLB** (Mobility Load Balancing);
 - um terceiro xApp, **xApp-CMF**, que implementa os três módulos do artigo — CD Agent (DCD + ICD), CR Agent e PMon (ImCD) — e é quem de fato detecta e mitiga os conflitos, rodando no Near-RT RIC como o artigo descreve, não embutido na simulação.
-=======
-Este repositório reúne, em um único lugar, tudo o que é necessário para reproduzir o cenário de conflito entre xApps descrito em [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023) (*"Conflict Mitigation Framework and Conflict Detection in O-RAN nRT-RIC"*, IEEE ComMag 2023) usando o módulo [NORI](https://github.com/lasseufpa/nori) do ns-3:
-
-- uma simulação ns-3 (`nori-cmf.cc`) com 19 estações-base e 380 usuários, conectada de verdade a um Near-RT RIC via E2;
-- dois xApps OSC que competem pelo controle da fronteira de handover de cada célula — **MRO** (Mobility Robustness Optimization) e **MLB** (Mobility Load Balancing);
-- o Conflict Mitigation Framework embarcado na própria simulação, que detecta e (opcionalmente) resolve os conflitos entre as decisões dos dois xApps.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 Nada aqui é um projeto novo do zero: são **patches** sobre dois projetos-base já existentes no ambiente OpenRAN@Brasil — o módulo `nori` do ns-3 e o xApp `xapp-nori`. Este README ensina exatamente onde aplicar cada patch e em que ordem.
 
@@ -27,18 +19,11 @@ Nada aqui é um projeto novo do zero: são **patches** sobre dois projetos-base 
   - [1. O módulo `nori-cmf` (ns-3)](#1-o-módulo-nori-cmf-ns-3)
   - [2. O xApp MRO](#2-o-xapp-mro)
   - [3. O xApp MLB](#3-o-xapp-mlb)
-<<<<<<< HEAD
   - [4. O xApp CMF](#4-o-xapp-cmf)
 - [Compilando o cenário ns-3](#compilando-o-cenário-ns-3)
 - [Embarcando os xApps no Near-RT RIC](#embarcando-os-xapps-no-near-rt-ric)
 - [Executando o cenário completo](#executando-o-cenário-completo)
 - [Verificando se o CMF está detectando e mitigando conflitos](#verificando-se-o-cmf-está-detectando-e-mitigando-conflitos)
-=======
-- [Compilando o cenário ns-3](#compilando-o-cenário-ns-3)
-- [Embarcando os xApps no Near-RT RIC](#embarcando-os-xapps-no-near-rt-ric)
-- [Executando o cenário completo](#executando-o-cenário-completo)
-- [Verificando se o laço de controle está fechando](#verificando-se-o-laço-de-controle-está-fechando)
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 - [Problemas conhecidos](#problemas-conhecidos)
 - [Referências](#referências)
 
@@ -48,11 +33,6 @@ Nada aqui é um projeto novo do zero: são **patches** sobre dois projetos-base 
 flowchart LR
     subgraph ns3["ns-3 (nori-cmf.cc)"]
         BS["19 estações-base<br/>380 UEs"]
-<<<<<<< HEAD
-=======
-        CMF["Conflict Mitigation<br/>Framework (CMF)"]
-        BS <--> CMF
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
     end
 
     subgraph ric["Near-RT RIC"]
@@ -63,16 +43,12 @@ flowchart LR
     subgraph xapps["xApps"]
         MRO["xApp MRO<br/>Hysteresis / TTT"]
         MLB["xApp MLB<br/>CIO"]
-<<<<<<< HEAD
         CMF["xApp CMF<br/>CD Agent + CR Agent + PMon"]
-=======
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
     end
 
     BS -- "E2 / SCTP<br/>indicação KPM" --> E2T
     E2T -- RMR --> MRO
     E2T -- RMR --> MLB
-<<<<<<< HEAD
     E2T -- RMR --> CMF
     MRO -- "HTTP POST<br/>/ric/v1/cmf/evaluate" --> CMF
     MLB -- "HTTP POST<br/>/ric/v1/cmf/evaluate" --> CMF
@@ -90,18 +66,6 @@ Os três parâmetros disputados — `HOMeasurementOffset` (CIO), `HOHysteresis` 
 `nori-cmf.cc` não participa dessa arbitragem — ele só aplica, sem questionar, qualquer decisão de controle que chegar via E2, de qualquer xApp. Toda a inteligência de detecção/mitigação vive no `xApp-CMF`, rodando no Near-RT RIC, como o artigo de referência propõe.
 
 Para o detalhamento completo do modelo de rede, rádio e mobilidade, veja [`nori-cmf/docs/nori-cmf.md`](nori-cmf/docs/nori-cmf.md). Para o funcionamento interno de cada xApp, veja o `README.md` dentro de [`xapp-MRO/`](xapp-MRO/README.md), [`xapp-MLB/`](xapp-MLB/README.md) e [`xapp-CMF/`](xapp-CMF/README.md) (este último detalha DCD, ICD, ImCD e o protocolo `/ric/v1/cmf/evaluate`).
-=======
-    MRO -- "RIC Control Request<br/>(HOHysteresis, HOTimeToTrigger)" --> E2T
-    MLB -- "RIC Control Request<br/>(HOMeasurementOffset)" --> E2T
-    E2T -- E2 / SCTP --> CMF
-    MRO -.-> SUB
-    MLB -.-> SUB
-```
-
-Os três parâmetros disputados — `HOMeasurementOffset` (CIO), `HOHysteresis` e `HOTimeToTrigger` — entram juntos na mesma condição do evento de handover A3. O MLB escreve o primeiro para balancear carga; o MRO escreve os outros dois para reduzir ping-pongs e falhas de enlace. Como pertencem ao mesmo grupo funcional (`CellAffectHandoverBoundary`), decisões simultâneas dos dois xApps sobre a mesma célula são um **conflito indireto** — exatamente o que o CMF do `nori-cmf.cc` foi construído para detectar e, dependendo do modo escolhido, mitigar.
-
-Para o detalhamento completo do modelo de rede, rádio, mobilidade e do próprio CMF, veja [`nori-cmf/docs/nori-cmf.md`](nori-cmf/docs/nori-cmf.md). Para o funcionamento interno de cada xApp, veja o `README.md` dentro de [`xapp-MRO/`](xapp-MRO/README.md) e [`xapp-MLB/`](xapp-MLB/README.md).
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ## Estrutura deste repositório
 
@@ -109,11 +73,7 @@ Para o detalhamento completo do modelo de rede, rádio, mobilidade e do próprio
 O-RAN_CMF_NORI/
 ├── nori-cmf/
 │   ├── examples/
-<<<<<<< HEAD
 │   │   ├── nori-cmf.cc                    # o cenário de RAN (sem lógica de conflito)
-=======
-│   │   ├── nori-cmf.cc                    # o cenário (arquivo novo)
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 │   │   └── CMakeLists.txt                 # registra o exemplo no build
 │   ├── model/
 │   │   ├── asn1c-types.cc / .h            # fix: RANParameterItem (double-free + m_id)
@@ -124,7 +84,6 @@ O-RAN_CMF_NORI/
 ├── xapp-MRO/
 │   ├── ... (árvore completa do xApp já modificado)
 │   └── xapp-MRO.patch                     # patch relativo ao xapp-nori original
-<<<<<<< HEAD
 ├── xapp-MLB/
 │   ├── ... (árvore completa do xApp já modificado)
 │   └── xapp-MLB.patch                     # patch relativo ao xapp-nori original
@@ -137,14 +96,6 @@ O-RAN_CMF_NORI/
 ```
 
 Cada diretório carrega **duas formas equivalentes** do mesmo conteúdo: a árvore de arquivos já pronta (para quem só quer copiar e usar) e um `.patch` (para quem prefere aplicar as mudanças sobre um clone limpo do projeto-base — a forma recomendada, porque preserva o histórico git de cada projeto). Este guia usa os `.patch`. Os três patches de xApp (`xapp-MRO.patch`, `xapp-MLB.patch`, `xapp-CMF.patch`) aplicam com `patch -p1`, o que funciona tanto com `git apply` quanto com o `patch` do GNU coreutils.
-=======
-└── xapp-MLB/
-    ├── ... (árvore completa do xApp já modificado)
-    └── xapp-MLB.patch                     # patch relativo ao xapp-nori original
-```
-
-Cada diretório carrega **duas formas equivalentes** do mesmo conteúdo: a árvore de arquivos já pronta (para quem só quer copiar e usar) e um `.patch` (para quem prefere aplicar as mudanças sobre um clone limpo do projeto-base — a forma recomendada, porque preserva o histórico git de cada projeto). Este guia usa os `.patch`.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ## Pré-requisitos
 
@@ -157,11 +108,7 @@ Todos os comandos abaixo assumem que você está no `$HOME` da VM (`~`, ou seja,
 
 ## Passo a passo: clonar e aplicar os patches
 
-<<<<<<< HEAD
 A ideia geral, repetida quatro vezes, é sempre a mesma: **clonar o projeto-base intocado e aplicar o patch por cima**. Nenhum dos quatro patches modifica os projetos originais — eles só adicionam o que falta para o CMF funcionar.
-=======
-A ideia geral, repetida três vezes, é sempre a mesma: **clonar o projeto-base intocado e aplicar o patch por cima**. Nenhum dos três patches modifica os projetos originais — eles só adicionam o que falta para o CMF funcionar.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ### 1. O módulo `nori-cmf` (ns-3)
 
@@ -181,15 +128,9 @@ git apply ~/O-RAN_CMF_NORI/nori-cmf/nori-cmf-examples-model.patch
 
 Isso faz três coisas:
 
-<<<<<<< HEAD
 1. adiciona `examples/nori-cmf.cc` — o cenário de RAN completo (19 células, emulação interna opcional de MRO/MLB para testes offline), **sem** nenhuma lógica de detecção/mitigação de conflito — essa parte foi deliberadamente removida daqui e vive inteira no `xApp-CMF` (passo 4);
 2. registra o novo exemplo em `examples/CMakeLists.txt`, para o `./ns3 build` encontrá-lo;
 3. corrige três bugs em `model/asn1c-types.{cc,h}` e `model/ric-control-message.cc` que, sem eles, fariam qualquer RIC Control Request de um xApp real ser silenciosamente ignorado (ou, em alguns casos, derrubar a simulação com um *double free*). Sem esse terceiro item, nenhum dos três xApps deste repositório consegue controlar as células — mesmo se estiverem rodando perfeitamente.
-=======
-1. adiciona `examples/nori-cmf.cc` — o cenário completo (19 células, xApps emulados internamente, CMF);
-2. registra o novo exemplo em `examples/CMakeLists.txt`, para o `./ns3 build` encontrá-lo;
-3. corrige três bugs em `model/asn1c-types.{cc,h}` e `model/ric-control-message.cc` que, sem eles, fariam qualquer RIC Control Request de um xApp real ser silenciosamente ignorado (ou, em alguns casos, derrubar a simulação com um *double free*). Sem esse terceiro item, os xApps MRO e MLB deste repositório não conseguem controlar as células — mesmo se estiverem rodando perfeitamente.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 Confira que aplicou certo:
 
@@ -218,17 +159,10 @@ O patch `xapp-MRO.patch` se aplica sobre um clone **limpo** do [`xapp-nori`](htt
 cd ~
 git clone https://github.com/LABORA-INF-UFG/xapp-nori.git xapp-MRO
 cd xapp-MRO
-<<<<<<< HEAD
 patch -p1 < ~/O-RAN_CMF_NORI/xapp-MRO/xapp-MRO.patch
 ```
 
 O patch reescreve a lógica de controle (`src/custom_xapp.py`, `src/main.py`), remove o módulo de RL que não é usado aqui (`src/env.py`), renomeia a instância para `xappmro` em todos os manifests e scripts (`init/config-file.json`, `setup.py`, `update_xapp.sh`, `log_xapp.sh`, `resubscribe.sh`), reduz `src/requirements.txt` às dependências realmente usadas, e substitui o `README.md` por um guia dedicado ao MRO. A lógica de controle inclui uma chamada HTTP a `xapp-CMF` (`/ric/v1/cmf/evaluate`) antes de qualquer RIC Control Request — se o CMF rejeitar, a decisão simplesmente não é enviada nesse ciclo.
-=======
-git apply ~/O-RAN_CMF_NORI/xapp-MRO/xapp-MRO.patch
-```
-
-O patch reescreve a lógica de controle (`src/custom_xapp.py`, `src/main.py`), remove o módulo de RL que não é usado aqui (`src/env.py`), renomeia a instância para `xappmro` em todos os manifests e scripts (`init/config-file.json`, `setup.py`, `update_xapp.sh`, `log_xapp.sh`, `resubscribe.sh`), reduz `src/requirements.txt` às dependências realmente usadas, e substitui o `README.md` por um guia dedicado ao MRO.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 Confira:
 
@@ -256,7 +190,6 @@ Exatamente o mesmo procedimento, em um clone separado, com o patch do MLB:
 cd ~
 git clone https://github.com/LABORA-INF-UFG/xapp-nori.git xapp-MLB
 cd xapp-MLB
-<<<<<<< HEAD
 patch -p1 < ~/O-RAN_CMF_NORI/xapp-MLB/xapp-MLB.patch
 ```
 
@@ -282,14 +215,6 @@ Além das mesmas mudanças de infraestrutura (nome `xappcmf`, `requirements.txt`
 - `src/pmon.py` — Performance Monitoring, alimentando a detecção implícita (ImCD), *post-action*.
 
 `src/custom_xapp.py` expõe `POST /ric/v1/cmf/evaluate`, o endpoint que MRO e MLB consultam antes de cada decisão de controle — veja [`xapp-CMF/README.md`](xapp-CMF/README.md) para o protocolo completo.
-=======
-git apply ~/O-RAN_CMF_NORI/xapp-MLB/xapp-MLB.patch
-```
-
-O MLB é o par funcional do MRO: mesma estrutura de patch, mesma lista de arquivos alterados — a diferença está inteiramente na lógica de controle (`custom_xapp.py`), que aqui decide o `HOMeasurementOffset` (CIO) a partir da carga de PRBs da célula, em vez de Hysteresis/TTT.
-
-> **Por que dois clones separados do mesmo repositório, em vez de um branch cada?** Porque `xapp-MRO` e `xapp-MLB` são publicados como dois xApps OSC independentes — cada um com seu próprio nome (`xappmro`/`xappmlb`), sua própria imagem Docker e seu próprio `Chart`/instalação no RIC (`dms_cli onboard`/`install`). Dois diretórios de trabalho separados evitam qualquer chance de misturar as instalações.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ## Compilando o cenário ns-3
 
@@ -305,7 +230,6 @@ Na primeira vez que qualquer parte do módulo `nori` for tocada, o `ns3 build` (
 Teste rapidamente em modo *offline* (sem depender do RIC — útil para confirmar que o build está saudável antes de mexer com Kubernetes):
 
 ```bash
-<<<<<<< HEAD
 ./ns3 run "nori-cmf --useE2=0 --simTime=30"
 ```
 
@@ -317,34 +241,15 @@ Com o RIC saudável (`kubectl get pods -n ricplt`), instale os três xApps. **In
 
 ```bash
 cd ~/xapp-CMF && bash update_xapp.sh
-=======
-./ns3 run "nori-cmf --useE2=0 --simTime=30 --cmMode=none"
-```
-
-Se aparecer o resumo `NORI CMF summary` no final, o build está correto.
-
-## Embarcando os xApps no Near-RT RIC
-
-Com o RIC saudável (`kubectl get pods -n ricplt`), instale os dois xApps — a ordem entre eles não importa:
-
-```bash
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 cd ~/xapp-MRO && bash update_xapp.sh
 cd ~/xapp-MLB && bash update_xapp.sh
 ```
 
-<<<<<<< HEAD
 Cada `update_xapp.sh` faz o ciclo completo sozinho: onboard do chart via `dms_cli`, build da imagem Docker, push para `127.0.0.1:5001`, e instalação no namespace `ricxapp`. Na primeira execução de cada um, o build da imagem baixa e compila `rmr`, clona o `ric-plt-xapp-frame-py` e instala as dependências Python — espere alguns minutos; execuções seguintes reaproveitam o cache de camadas do Docker (a segunda e terceira imagem, construídas logo em seguida, costumam ser rápidas).
 
 ```bash
 kubectl get pods -n ricxapp
 # ricxapp-xappcmf-... 1/1 Running
-=======
-Cada `update_xapp.sh` faz o ciclo completo sozinho: onboard do chart via `dms_cli`, build da imagem Docker, push para `127.0.0.1:5001`, e instalação no namespace `ricxapp`. Na primeira execução de cada um, o build da imagem baixa e compila `rmr`, clona o `ric-plt-xapp-frame-py` e instala as dependências Python — espere alguns minutos; execuções seguintes reaproveitam o cache de camadas do Docker.
-
-```bash
-kubectl get pods -n ricxapp
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 # ricxapp-xappmro-... 1/1 Running
 # ricxapp-xappmlb-... 1/1 Running
 ```
@@ -353,11 +258,7 @@ Cada `xapp-*/README.md` traz um roteiro passo a passo bem mais detalhado desta e
 
 ## Executando o cenário completo
 
-<<<<<<< HEAD
 Com os três xApps já `1/1 Running`, descubra o IP do pod `e2term` e suba a simulação em modo E2:
-=======
-Com os xApps já `1/1 Running`, descubra o IP do pod `e2term` e suba a simulação em modo E2:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ```bash
 E2TERM_IP=$(kubectl get pods -n ricplt -o wide | grep e2term-alpha | awk '{print $6}')
@@ -370,20 +271,14 @@ As 19 células devem completar o E2-SETUP com o RIC (`[INFO ] [SCTP] Sent E2-SET
 Como os xApps normalmente já estavam rodando **antes** dessas 19 células existirem, é preciso pedir a eles para procurar de novo os nós E2 disponíveis:
 
 ```bash
-<<<<<<< HEAD
 CMF_IP=$(kubectl get svc -n ricxapp service-ricxapp-xappcmf-http -o jsonpath='{.spec.clusterIP}')
 MRO_IP=$(kubectl get svc -n ricxapp service-ricxapp-xappmro-http -o jsonpath='{.spec.clusterIP}')
 MLB_IP=$(kubectl get svc -n ricxapp service-ricxapp-xappmlb-http -o jsonpath='{.spec.clusterIP}')
 curl "http://$CMF_IP:8080/ric/v1/resubscribe"
-=======
-MRO_IP=$(kubectl get svc -n ricxapp service-ricxapp-xappmro-http -o jsonpath='{.spec.clusterIP}')
-MLB_IP=$(kubectl get svc -n ricxapp service-ricxapp-xappmlb-http -o jsonpath='{.spec.clusterIP}')
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 curl "http://$MRO_IP:8080/ric/v1/resubscribe"
 curl "http://$MLB_IP:8080/ric/v1/resubscribe"
 ```
 
-<<<<<<< HEAD
 (Os scripts `bash resubscribe.sh` dentro de cada diretório do xApp fazem a mesma coisa, resolvendo o Service automaticamente.) A resposta HTTP volta imediatamente — a resubscrição de fato roda em segundo plano dentro do pod (veja [Problemas conhecidos](#problemas-conhecidos) sobre o tempo que isso pode levar).
 
 ## Verificando se o CMF está detectando e mitigando conflitos
@@ -405,56 +300,32 @@ curl -s -X POST http://$CMF_IP:8080/ric/v1/cmf/evaluate \
 A segunda chamada propõe uma mudança de CIO na mesma célula em que o MRO acabou de mudar a Hysteresis — um conflito indireto estrutural (mesmo grupo `CellAffectHandoverBoundary`) — e é corretamente rejeitada, com o modo de prioridade padrão (`prioMRO`). Confira o registro em `kubectl logs` do `xapp-CMF` e em `/tmp/conflicts.json` dentro do pod (`kubectl exec ... -- cat /tmp/conflicts.json`).
 
 Para ver o laço fechado de verdade, com decisões vindas da simulação, acompanhe os logs do MRO ou do MLB:
-=======
-(Os scripts `bash resubscribe.sh` dentro de cada diretório do xApp fazem a mesma coisa, resolvendo o Service automaticamente.)
-
-## Verificando se o laço de controle está fechando
-
-Acompanhe os logs de qualquer um dos dois xApps:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ```bash
 kubectl logs -n ricxapp -f $(kubectl get pods -n ricxapp | grep xappmro | awk '{print $1}') | grep "Cell NRCellDU"
 ```
 
-<<<<<<< HEAD
 Uma decisão real, aprovada pelo CMF e aplicada, tem esta cara — repare que o `(was ...)` de uma linha bate com o valor que a linha *anterior*, para a mesma célula, mandou aplicar:
-=======
-Uma decisão real e aplicada tem esta cara — repare que o `(was ...)` de uma linha bate com o valor que a linha *anterior*, para a mesma célula, mandou aplicar:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ```text
 Cell NRCellDU_12: ho=11 pp_ratio=27.3% rlf_ratio=9.1% -> hysteresis=1.0dB ttt=0.1s (was hysteresis=1.0 ttt=0.08)
 Cell NRCellDU_12: ho=12 pp_ratio=25.0% rlf_ratio=8.3% -> hysteresis=1.0dB ttt=0.08s (was hysteresis=1.0 ttt=0.1)
 ```
 
-<<<<<<< HEAD
 Isso confirma o laço completo: a decisão do xApp foi aprovada pelo `xapp-CMF`, saiu como RIC Control Request, foi decodificada e aplicada pelo `nori-cmf.cc` (graças às correções do passo 1), e voltou refletida na indicação KPM seguinte. Os mesmos valores também aparecem no CSV que a própria simulação grava (`<outputDir>/bs-12.csv`, colunas `hyst`/`ttt`, ou `cio` para o MLB) — útil para conferência cruzada sem depender dos logs do xApp.
-=======
-Isso confirma o laço completo: a decisão do xApp saiu como RIC Control Request, foi decodificada e aplicada pelo `nori-cmf.cc` (graças às correções do passo 1), e voltou refletida na indicação KPM seguinte. Os mesmos valores também aparecem no CSV que a própria simulação grava (`<outputDir>/bs-12.csv`, colunas `hyst`/`ttt`, ou `cio` para o MLB) — útil para conferência cruzada sem depender dos logs do xApp.
-
-Se ambos os xApps estiverem ativos ao mesmo tempo, acompanhe também `conflicts.json` dentro do diretório de saída da simulação: cada conflito indireto detectado entre MRO e MLB é registrado ali, no mesmo formato JSON do artigo de referência.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ## Problemas conhecidos
 
 - **`e2term` pode crashar ao final de uma simulação.** Quando o `nori-cmf` termina, as 19 conexões SCTP fecham quase ao mesmo tempo; isso expõe um bug pré-existente no `e2term` do RIC (`free(): invalid pointer`, não relacionado a este repositório) que derruba o pod com alguma frequência. O Kubernetes reinicia o pod sozinho em 1–2 minutos — espere `kubectl get pods -n ricplt` mostrar `1/1` de novo antes de rodar outra simulação.
-<<<<<<< HEAD
 - **Resubscrição pode demorar em clusters com histórico.** `bash resubscribe.sh` retorna imediatamente (o trabalho roda em segundo plano dentro do pod), mas, se o RIC acumulou muitos registros de gNBs antigos/obsoletos ao longo do tempo (comum depois de várias rodadas de teste), o ciclo completo de cancelar+recriar assinaturas pode levar vários minutos — em testes com um cluster bastante usado, chegou a não terminar dentro da janela de uma simulação de ~2 minutos. Isso afeta MRO, MLB e CMF igualmente (todos os três sofrem do mesmo padrão de assinatura). Não é motivo para achar que algo está quebrado: use a verificação direta via `/ric/v1/cmf/evaluate` (seção anterior) para confirmar que o CMF em si está saudável, independentemente de quanto da resubscrição já terminou.
-=======
-- **Resubscrição pode demorar em clusters com histórico.** `bash resubscribe.sh` retorna imediatamente (o trabalho roda em segundo plano dentro do pod), mas, se o RIC acumulou muitos registros de gNBs antigos/obsoletos ao longo do tempo, o ciclo completo de cancelar+recriar assinaturas pode levar mais de um minuto. Acompanhe os logs em vez de assumir falha.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
+- **Cuidado ao dar `git pull` neste repositório com alterações locais não commitadas.** Se houver mudanças pendentes (por exemplo, geradas por uma sessão anterior deste mesmo projeto) e o histórico remoto tiver divergido, um `git pull` pode gerar conflitos de merge; se resolvidos incorretamente (ou commitados sem resolver), os marcadores `<<<<<<<`/`=======`/`>>>>>>>` acabam parando dentro dos arquivos versionados — inclusive em código C++/Python, quebrando o build. Antes de um `git pull`, rode `git status` e `git stash` (ou commit) qualquer alteração pendente; depois do pull, é boa prática rodar `grep -rn "^<<<<<<< \|^=======$\|^>>>>>>> "` na árvore para confirmar que nada ficou malresolvido.
 
 O `README.md` de cada xApp traz uma seção de troubleshooting mais completa, incluindo como diagnosticar `CrashLoopBackOff` e reinícios por falha do *liveness probe* (exit code 137).
 
 ## Referências
 
-<<<<<<< HEAD
 - Framework de mitigação de conflitos: [Adamczyk & Kliks, "Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC", IEEE ComMag 2023](https://arxiv.org/abs/2305.07117)
 - Especificação do cenário e material suplementar: [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023)
-=======
-- Especificação do cenário: [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023)
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 - Módulo NORI: [`lasseufpa/nori`](https://github.com/lasseufpa/nori)
 - xApp base: [`LABORA-INF-UFG/xapp-nori`](https://github.com/LABORA-INF-UFG/xapp-nori)
 - Documentação completa do cenário: [`nori-cmf/docs/nori-cmf.md`](nori-cmf/docs/nori-cmf.md)

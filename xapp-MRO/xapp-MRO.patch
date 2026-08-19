@@ -1,15 +1,8 @@
 diff --git a/README.md b/README.md
-<<<<<<< HEAD
 index 503d61c..ffc93d9 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,51 +1,189 @@
-=======
-index 503d61c..d5cd23f 100644
---- a/README.md
-+++ b/README.md
-@@ -1,51 +1,191 @@
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 -# xapp-nori
 -The xApp-NORI is an OSC xApp for interacting with gNBs simulated by the NORI NS-3 module.
 +# xapp-MRO
@@ -19,11 +12,8 @@ index 503d61c..d5cd23f 100644
 +
 +It is built from the same base as [`xapp-nori`](../xapp-nori), stripped of the RL/network-slicing logic and replaced with a closed-loop MRO controller.
 +
-<<<<<<< HEAD
 +> Deploy [`xapp-CMF`](../xapp-CMF) alongside this xApp and [`xapp-MLB`](../xapp-MLB) if you want conflicts between the two actually mitigated, not just detected/logged after the fact — see [Conflicts with MLB, and the CMF](#conflicts-with-mlb-and-the-cmf) below.
 +
-=======
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +## What it does
 +
 +The xApp subscribes to RAN Function ID 200 (KPM) on every registered E2 node. Each RIC Indication received from a cell carries, among other measurements:
@@ -51,19 +41,9 @@ index 503d61c..d5cd23f 100644
 +
 +`HOMeasurementOffset` (CIO), `HOHysteresis` and `HOTimeToTrigger` jointly decide when a handover fires (they all enter the same A3-event inequality). If an MLB xApp is also adjusting CIO on the same cells this xApp is adjusting Hysteresis/TTT on, the two are structurally in an **indirect conflict** per the taxonomy of [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023): different parameters, same functional group (`CellAffectHandoverBoundary`).
 +
-<<<<<<< HEAD
 +Conflict detection and resolution are **not** done by this xApp, and not by `nori-cmf.cc` either: they are the job of a third xApp, [`xapp-CMF`](../xapp-CMF), which implements the Conflict Detection (DCD/ICD/ImCD) and Conflict Resolution Agents of [Adamczyk & Kliks, IEEE ComMag 2023](https://arxiv.org/abs/2305.07117). Before this xApp sends a RIC Control Request for a new Hysteresis/TTT value, it first submits the proposal to `xapp-CMF`'s `POST /ric/v1/cmf/evaluate` and only proceeds if the answer is `{"allowed": true}` — see [`xapp-CMF`'s README](../xapp-CMF/README.md) for the full protocol and the resolution modes (`none`, `prioMRO`, `prioMLB`). If `xapp-CMF` is unreachable, this call fails open (a warning is logged, and the decision proceeds unmitigated) rather than freezing RAN control on a missing dependency.
 +
 +Every detected conflict is logged by `xapp-CMF` to `/tmp/conflicts.json` inside its own pod, in the same JSON format documented in the reference repository.
-=======
-+When both xApps run against `nori-cmf.cc`, its built-in Conflict Mitigation Framework detects this on every control round and, depending on `--cmMode`:
-+
-+- `none`: both decisions are applied — this is the "no CM" baseline of the reference paper;
-+- `prioMRO`: this xApp's decision wins, the MLB xApp's CIO update for that round is dropped;
-+- `prioMLB`: the MLB xApp's decision wins, this xApp's update for that round is dropped.
-+
-+Every detected conflict is logged by the simulator to `conflicts.json` in the scenario's output directory, in the same JSON format documented in the reference repository. See [`nori-cmf.md`](../ns-3-dev/contrib/nori/docs/nori-cmf.md#10-o-conflict-mitigation-framework-cmf) for the full CMF description.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +
 +## Wire format
 +
@@ -334,17 +314,10 @@ index 1da1cd3..0396335 100644
      author_email='danielcampossilva@inf.ufg.br',
      python_requires='>=3.8',
 diff --git a/src/custom_xapp.py b/src/custom_xapp.py
-<<<<<<< HEAD
 index ed1b4b0..3ea2d1f 100644
 --- a/src/custom_xapp.py
 +++ b/src/custom_xapp.py
 @@ -9,26 +9,102 @@ from ricxappframe import xapp_rest, xapp_subscribe
-=======
-index ed1b4b0..6480b73 100644
---- a/src/custom_xapp.py
-+++ b/src/custom_xapp.py
-@@ -9,26 +9,94 @@ from ricxappframe import xapp_rest, xapp_subscribe
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
  from ricxappframe.entities.rnib.nb_identity_pb2 import NbIdentity
  
  # Imports from other libraries
@@ -428,7 +401,6 @@ index ed1b4b0..6480b73 100644
 +# control requests every reporting period.
 +DECISION_EPSILON = 1e-6
 +
-<<<<<<< HEAD
 +# The Conflict Mitigation Framework xApp (see xapp-CMF): every decision below
 +# is submitted here *before* being sent to the RAN, and only proceeds if
 +# allowed. A short timeout with fail-open behaviour keeps a missing/crashed
@@ -437,8 +409,6 @@ index ed1b4b0..6480b73 100644
 +CMF_EVALUATE_URL = "http://service-ricxapp-xappcmf-http.ricxapp:8080/ric/v1/cmf/evaluate"
 +CMF_TIMEOUT_S = 2
 +
-=======
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +
 +class XappMro:
      """
@@ -462,11 +432,7 @@ index ed1b4b0..6480b73 100644
      """
  
      def __init__(self):
-<<<<<<< HEAD
 @@ -36,15 +112,13 @@ class XappNori:
-=======
-@@ -36,15 +104,13 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
          Initializes the custom xApp instance and instatiates the xApp framework object.
          """
  
@@ -485,11 +451,7 @@ index ed1b4b0..6480b73 100644
  
          # Initializing custom control variables
          self._shutdown = False  # Stops the xApp loop if True
-<<<<<<< HEAD
 @@ -66,17 +140,6 @@ class XappNori:
-=======
-@@ -66,17 +132,6 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
              use_fake_sdl=False,  # Use a fake in-memory SDL
          )
  
@@ -507,11 +469,7 @@ index ed1b4b0..6480b73 100644
          # Registering RMR message handlers
          self._rmrxapp.register_callback(
              handler=self.ric_indication_handler, message_type=12050
-<<<<<<< HEAD
 @@ -139,29 +202,6 @@ class XappNori:
-=======
-@@ -139,29 +194,6 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
              self.bucket = "openranbr"  # your InfluxDB bucket name
              self.client = InfluxDBClient(url=url, token=token, org=org)
              self.write_api = self.client.write_api()
@@ -541,11 +499,7 @@ index ed1b4b0..6480b73 100644
  
      # ------------------ START AND STOP
  
-<<<<<<< HEAD
 @@ -207,95 +247,17 @@ class XappNori:
-=======
-@@ -207,95 +239,17 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
  
      def log_gnbs(self):
          """
@@ -564,11 +518,7 @@ index ed1b4b0..6480b73 100644
 -            self.logger.info(f"PLMN ID: {global_nb_id.plmn_id}")
 -            self.logger.info(f"NNBID: {global_nb_id.nb_id}")
 -            self.logger.info(f"Connection status: {nbid.connection_status}")  # 1 ????
-<<<<<<< HEAD
 -            self.logger.info(
-=======
-             self.logger.info(
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 -                f"Health Check Timestamp Received: {nbid.health_check_timestamp_received}"
 -            )  # 0 ???
 -            self.logger.info(
@@ -587,11 +537,7 @@ index ed1b4b0..6480b73 100644
 -            self.logger.info(
 -                f"RAN Name: {nbinfo.ran_name}"
 -            )  # Same as the inventory name
-<<<<<<< HEAD
              self.logger.info(
-=======
--            self.logger.info(
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 -                f"Setup From Network: {nbinfo.setup_from_network}"
 -            )  # True ??
 -
@@ -652,11 +598,7 @@ index ed1b4b0..6480b73 100644
  
      def subscribe_to_e2_nodes(self):
          """
-<<<<<<< HEAD
 @@ -303,7 +265,7 @@ class XappNori:
-=======
-@@ -303,7 +257,7 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
          """
          e2_nodes = self._rmrxapp.GetListNodebIds()
          sub_trs_id = self._rmrxapp.sdl_get(
@@ -665,11 +607,7 @@ index ed1b4b0..6480b73 100644
          )
          if sub_trs_id is None:
              sub_trs_id = 54321
-<<<<<<< HEAD
 @@ -317,10 +279,20 @@ class XappNori:
-=======
-@@ -317,10 +271,20 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                  node.inventory_name, sub_trs_id
              )
              self.logger.debug(f"Subscription request: {subscription_req}")
@@ -694,11 +632,7 @@ index ed1b4b0..6480b73 100644
              status = resp.status_code
              reason = resp.reason
  
-<<<<<<< HEAD
 @@ -339,7 +311,7 @@ class XappNori:
-=======
-@@ -339,7 +303,7 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                  f"Subscription response from {node.inventory_name}: status = {status}, reason = {reason}, data = {data}"
              )
              self._rmrxapp.sdl_set(
@@ -707,11 +641,7 @@ index ed1b4b0..6480b73 100644
                  key="subscription_transaction_id",
                  value=sub_trs_id + 1,
              )  # Update sub_trs_id on SDL
-<<<<<<< HEAD
 @@ -349,15 +321,24 @@ class XappNori:
-=======
-@@ -349,15 +313,24 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
          Unsubscribes from all subscribed E2 nodes (stored in the self.subscription_responses dict).
          """
  
@@ -745,11 +675,7 @@ index ed1b4b0..6480b73 100644
  
      def resubscribe_to_e2_nodes(self):
          """
-<<<<<<< HEAD
 @@ -388,12 +369,13 @@ class XappNori:
-=======
-@@ -388,12 +361,13 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
  
      def ric_indication_handler(self, rmrxapp: RMRXapp, summary: dict, sbuf):
          """
@@ -766,11 +692,7 @@ index ed1b4b0..6480b73 100644
  
          # Decoding the E2AP PDU data
          pdu = E2AP_PDU_Descriptions.E2AP_PDU
-<<<<<<< HEAD
 @@ -435,179 +417,182 @@ class XappNori:
-=======
-@@ -435,179 +409,139 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
              "indicationMessage": decoded_ric_indication_message,
          }
  
@@ -949,7 +871,6 @@ index ed1b4b0..6480b73 100644
 -    def send_ran_slicing_control(
 -        self, slices_id: dict, action: np.ndarray, rmrxapp: RMRXapp, summary: dict, sbuf
 -    ):
-<<<<<<< HEAD
 -        """
 -        Sends a RAN slicing control message to the RIC.
 -        """
@@ -984,11 +905,6 @@ index ed1b4b0..6480b73 100644
 -            "ric-ControlAction-ID": 1, 
 -            "rrmPolicyList": rrm_policy_list,
 -        }
-=======
-+        new_hyst = rlf_ratio_to_hysteresis(rlf_ratio)
-+        new_ttt = pingpong_ratio_to_ttt(pp_ratio)
-+
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        decisions: List[Tuple[int, float]] = []
 +        if current_hyst is None or abs(new_hyst - current_hyst) > DECISION_EPSILON:
 +            decisions.append((RAN_PARAM_HYSTERESIS, new_hyst))
@@ -1016,19 +932,15 @@ index ed1b4b0..6480b73 100644
 +        if not decisions:
 +            return
 +
-<<<<<<< HEAD
 +        cell_id = _parse_cell_id(cell_object_id)
 +        approved = self._filter_through_cmf(cell_id, decisions)
 +        if not approved:
 +            return
 +
-=======
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        self.logger.info(
 +            f"Cell {cell_object_id}: ho={ho_total} pp_ratio={pp_ratio:.1%} "
 +            f"rlf_ratio={rlf_ratio:.1%} -> hysteresis={new_hyst}dB ttt={new_ttt}s "
 +            f"(was hysteresis={current_hyst} ttt={current_ttt})"
-<<<<<<< HEAD
          )
  
 -        asn1_control_header.set_val(ric_control_header)
@@ -1075,63 +987,17 @@ index ed1b4b0..6480b73 100644
 +
 +    def build_ric_control_pdu(self, decisions: List[Tuple[int, float]]) -> bytes:
 +        """
-=======
-+        )
-+
-+        coded_pdu = self.build_ric_control_pdu(decisions)
-+        rmrxapp.rmr_rts(sbuf, new_payload=coded_pdu, new_mtype=12040)  # RIC Control Request
-+
-+    def build_ric_control_pdu(self, decisions: List[Tuple[int, float]]) -> bytes:
-         """
--        Sends a RAN slicing control message to the RIC.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        Encodes an E2AP RIC Control Request PDU carrying an
 +        E2SM-RC-ControlMessage-Format1 whose ranParameters-List holds one
 +        RANParameter-Item per (parameter_id, value) decision. Values are sent
 +        in milli-units (milli-dB for hysteresis, milliseconds for TTT), matching
 +        the convention decoded by RicControlCallback() in nori-cmf.cc.
-<<<<<<< HEAD
 +        """
-=======
-         """
--
--        ####### Creating RIC Control Request to control PRB slice quota
--        # Encoding RIC Control Header
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        # RIC Control Header: mandatory but not consumed by nori-cmf.cc for
 +        # this parameter path, so ueId/style/action are harmless placeholders.
 +        # rrmPolicyList is intentionally omitted (it is OPTIONAL and only used
 +        # by the RAN-slicing control path).
-<<<<<<< HEAD
 +        asn1_control_header = E2SM_KPM_RC.E2SM_RC_ControlHeader
-=======
-         asn1_control_header = E2SM_KPM_RC.E2SM_RC_ControlHeader
--        rrm_policy_list = []
--        for slice_id, rb_alloc in zip(slices_id, action):
--            rrm_policy = {
--                "rrmPolicy": {
--                    "rrmPolicyMemberList": [
--                        {
--                            "plmnIdentity": b"\x00\x01\x02",
--                            "sNSSAI": {
--                                "sST": slice_id["sST"],
--                                "sD": slice_id["sD"],
--                            },
--                        }
--                    ]
--                },
--                "dedicatedPRBPolicyRatio": int(rb_alloc),
--                "minPRBPolicyRatio": int(rb_alloc),
--                "maxPRBPolicyRatio": 100,
--            }
--            rrm_policy_list.append(rrm_policy)
--        ric_control_header = ('controlHeader-Format1', {
--            "ueId":b'\x00\x01', 
--            "ric-ControlStyle-Type": 1, 
--            "ric-ControlAction-ID": 1, 
--            "rrmPolicyList": rrm_policy_list,
--        }
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        control_header = (
 +            "controlHeader-Format1",
 +            {
@@ -1139,13 +1005,7 @@ index ed1b4b0..6480b73 100644
 +                "ric-ControlStyle-Type": 1,
 +                "ric-ControlAction-ID": 1,
 +            },
-<<<<<<< HEAD
 +        )
-=======
-         )
--
--        asn1_control_header.set_val(ric_control_header)
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        asn1_control_header.set_val(control_header)
          coded_control_header = asn1_control_header.to_aper()
  
@@ -1173,11 +1033,7 @@ index ed1b4b0..6480b73 100644
          asn1_pdu = E2AP_PDU_Descriptions.E2AP_PDU
          ric_request_msg = (
              "initiatingMessage",
-<<<<<<< HEAD
 @@ -623,13 +608,16 @@ class XappNori:
-=======
-@@ -623,13 +557,16 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                                  "criticality": "reject",
                                  "value": (
                                      "RICrequestID",
@@ -1196,11 +1052,7 @@ index ed1b4b0..6480b73 100644
                              },
                              {
                                  "id": 20,
-<<<<<<< HEAD
 @@ -644,7 +632,7 @@ class XappNori:
-=======
-@@ -644,7 +581,7 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                              {
                                  "id": 23,
                                  "criticality": "reject",
@@ -1209,59 +1061,28 @@ index ed1b4b0..6480b73 100644
                              },
                          ]
                      },
-<<<<<<< HEAD
 @@ -652,24 +640,76 @@ class XappNori:
-=======
-@@ -652,24 +589,76 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
              },
          )
          asn1_pdu.set_val(ric_request_msg)
 -        coded_pdu = asn1_pdu.to_aper()
 +        return asn1_pdu.to_aper()
-<<<<<<< HEAD
 +
 +    # ------------------ INFLUXDB
 +
 +    def send_influxdb_data(self, data: dict):
 +        points = []
 +
-=======
- 
--        # Sending the RIC Control Request
--        rmrxapp.rmr_rts(
--            sbuf, new_payload=coded_pdu, new_mtype=12040
--        )  # 12040 = RIC Control Request
-+    # ------------------ INFLUXDB
- 
--        # # Decoding RIC Control Request
--        # asn1_pdu.from_aper(coded_pdu)
--        # decoded_pdu = asn1_pdu.get_val()
--        # self.logger.info(f"\n\n\n################\nDecoded PDU: {decoded_pdu}")
-+    def send_influxdb_data(self, data: dict):
-+        points = []
- 
--        # # Decoding RIC Control Header
--        # assert decoded_pdu is not None, "Decoded PDU is None"
--        # coded_control = decoded_pdu[1]["value"][1]["protocolIEs"][3]["value"][1]
--        # asn1_control_header.from_aper(coded_control)
--        # decoded_control = asn1_control_header.get_val()
--        # self.logger.info(f"\n\n\n################\nDecoded Control Header: {decoded_control}")
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        # Common tags
 +        collection_start_time = datetime.datetime.now(datetime.timezone.utc)
 +
 +        # Extract cellObjectID
 +        cell_object_id = data["indicationMessage"][1]["cellObjectID"]
-<<<<<<< HEAD
  
 -        # Sending the RIC Control Request
 -        rmrxapp.rmr_rts(
 -            sbuf, new_payload=coded_pdu, new_mtype=12040
 -        )  # 12040 = RIC Control Request
-=======
-+
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        # Cell-level PM info
 +        if "list-of-PM-Information" in data["indicationMessage"][1]:
 +            for pm_info in data["indicationMessage"][1]["list-of-PM-Information"]:
@@ -1275,15 +1096,11 @@ index ed1b4b0..6480b73 100644
 +                    .time(collection_start_time, WritePrecision.NS)
 +                )
 +                points.append(p)
-<<<<<<< HEAD
  
 -        # # Decoding RIC Control Request
 -        # asn1_pdu.from_aper(coded_pdu)
 -        # decoded_pdu = asn1_pdu.get_val()
 -        # self.logger.info(f"\n\n\n################\nDecoded PDU: {decoded_pdu}")
-=======
-+
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +        if points:
 +            self.write_api.write(bucket=self.bucket, record=points)
 +
@@ -1325,7 +1142,6 @@ index ed1b4b0..6480b73 100644
 +            p = p.field("current_cio_db", cio_milli / 1000.0)
 +        p = p.time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.NS)
 +        self.write_api.write(bucket=self.bucket, record=[p])
-<<<<<<< HEAD
  
 -        # # Decoding RIC Control Header
 -        # assert decoded_pdu is not None, "Decoded PDU is None"
@@ -1333,18 +1149,11 @@ index ed1b4b0..6480b73 100644
 -        # asn1_control_header.from_aper(coded_control)
 -        # decoded_control = asn1_control_header.get_val()
 -        # self.logger.info(f"\n\n\n################\nDecoded Control Header: {decoded_control}")
-=======
-+
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 +    # ------------------ HTTP HANDLERS
  
      def resubscribe_handler(self, name: str, path: str, data: bytes, ctype: str):
          """
-<<<<<<< HEAD
 @@ -678,9 +718,17 @@ class XappNori:
-=======
-@@ -678,9 +667,17 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
          self.logger.info(
              "Received GET /ric/v1/resubscribe request, resubscribing to E2 Nodes"
          )
@@ -1364,11 +1173,7 @@ index ed1b4b0..6480b73 100644
          )  # Initiating HTTP response
          return response
  
-<<<<<<< HEAD
 @@ -696,56 +744,54 @@ class XappNori:
-=======
-@@ -696,56 +693,54 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                  sub_resp
              )
          )
@@ -1439,11 +1244,7 @@ index ed1b4b0..6480b73 100644
          if self._ready:
              response = xapp_rest.initResponse(
                  status=200, response="Readiness"  # Status = 200 OK
-<<<<<<< HEAD
 @@ -758,7 +804,6 @@ class XappNori:
-=======
-@@ -758,7 +753,6 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
                  status=503, response="Readiness"  # Status = 503 Service Unavailable
              )
              response["payload"] = json.dumps({"status": "Not ready"})
@@ -1451,11 +1252,7 @@ index ed1b4b0..6480b73 100644
          return response
  
      # ------------------ SUBSCRIPTION REQUEST JSON
-<<<<<<< HEAD
 @@ -770,7 +815,7 @@ class XappNori:
-=======
-@@ -770,7 +764,7 @@ class XappNori:
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
          return {
              "SubscriptionId": "",
              "ClientEndpoint": {
@@ -1464,7 +1261,6 @@ index ed1b4b0..6480b73 100644
                  "HTTPPort": 8080,
                  "RMRPort": 4560,
              },
-<<<<<<< HEAD
 @@ -799,3 +844,11 @@ class XappNori:
                  }
              ],
@@ -1477,8 +1273,6 @@ index ed1b4b0..6480b73 100644
 +        return int(cell_object_id.rsplit("_", 1)[1])
 +    except (IndexError, ValueError):
 +        return None
-=======
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 diff --git a/src/env.py b/src/env.py
 deleted file mode 100644
 index 1787716..0000000

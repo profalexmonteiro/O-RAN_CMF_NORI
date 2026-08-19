@@ -300,68 +300,17 @@ bestQuality (com CIO da vizinha) > servingQuality (com CIO da própria célula) 
                                      [avaliado continuamente por TTT segundos]
 ```
 
-<<<<<<< HEAD
 Um aumento de CIO decidido pelo MLB para aliviar uma célula lotada pode ser parcialmente ou totalmente anulado por um aumento de histerese decidido pelo MRO na mesma célula, pensado para reduzir ping-pongs — e vice-versa. É exatamente esse acoplamento que o [`xapp-CMF`](../../../xapp-CMF) formaliza como um único grupo `CellAffectHandoverBoundary` (`PARAMETER_GROUPS` em `xapp-CMF/src/cd_agent.py`), usado pelo detector ICD.
-=======
-Um aumento de CIO decidido pelo MLB para aliviar uma célula lotada pode ser parcialmente ou totalmente anulado por um aumento de histerese decidido pelo MRO na mesma célula, pensado para reduzir ping-pongs — e vice-versa. É exatamente esse acoplamento que a `PARAMETER_GROUPS` (linha ~351) formaliza como um único grupo `CellAffectHandoverBoundary`, usado pelo detector ICD.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ---
 
 ## 10. O Conflict Mitigation Framework (CMF)
 
-<<<<<<< HEAD
 > **O CMF não vive mais neste arquivo.** Versões anteriores deste exemplo embutiam a detecção e mitigação de conflitos diretamente na simulação (`DetectAndMitigate()`, `ReportConflict()`, o parâmetro `--cmMode`). Isso foi removido: `nori-cmf.cc` hoje é *só* o cenário de RAN + nó E2 — ele aplica, sem arbitrar, qualquer decisão de controle que receber, seja da emulação interna de MRO/MLB (modo offline), seja de um xApp real via E2.
 >
 > O CMF (CD Agent, CR Agent, PMon) agora é um xApp separado, [`xapp-CMF`](../../../xapp-CMF), rodando no Near-RT RIC — exatamente onde o artigo de referência ([Adamczyk & Kliks, IEEE ComMag 2023](https://arxiv.org/abs/2305.07117)) o posiciona (Fig. 2 do artigo: o CM é uma entidade do Near-RT RIC, não do simulador de RAN). Os xApps MRO e MLB submetem cada decisão ao `xapp-CMF` (`POST /ric/v1/cmf/evaluate`) *antes* de enviar um RIC Control Request; se rejeitada, a decisão simplesmente não é enviada.
 >
 > Para a implementação de DCD, ICD, ICD e do CR Agent, veja [`xapp-CMF/README.md`](../../../xapp-CMF/README.md) e os módulos `src/cd_agent.py`, `src/cr_agent.py`, `src/pmon.py` daquele xApp. A [seção 15.3](#153-validação-numérica) abaixo preserva a validação numérica feita quando o CMF ainda era embutido — os números continuam válidos como evidência de que o modelo de rádio/mobilidade e as tabelas de decisão de MRO/MLB estão corretos, só não refletem mais o caminho de mitigação (que agora é testado a partir do `xapp-CMF`).
-=======
-### 10.1 Coleta e agrupamento das decisões
-
-A cada rodada de controle, `RunXapps()` monta uma lista de decisões pendentes (`ControlDecision`, linha ~339) — uma por parâmetro que mudou de valor em qualquer célula — e a entrega para `DetectAndMitigate()` (linha ~1433), que primeiro as agrupa por célula-alvo:
-
-```cpp
-std::map<uint32_t, std::vector<size_t>> byCell;
-```
-
-### 10.2 Detecção
-
-Dentro de cada célula, todo par de decisões de **xApps diferentes** é comparado:
-
-```cpp
-if (da.parameter == db.parameter)
-{
-    // DCD: mesmo parâmetro, xApps diferentes → conflito direto
-}
-else if (GroupOf(da.parameter) == GroupOf(db.parameter))
-{
-    // ICD: parâmetros diferentes do mesmo grupo → conflito indireto
-}
-```
-
-No cenário atual (só MRO e MLB, sem duplicatas do mesmo xApp), conflitos **diretos** nunca deveriam ocorrer — são detectados por completude do framework e ficariam ativos automaticamente se um segundo xApp de MRO ou MLB fosse adicionado. Conflitos **indiretos** são o caso comum: MRO ajustando histerese/TTT e MLB ajustando CIO na mesma célula, na mesma rodada.
-
-Todo conflito detectado é registrado em `conflicts.json`, no **mesmo formato JSON** das mensagens de referência (`ReportConflict()`, linha ~1550) — ver [seção 12.2](#122-conflictsjson).
-
-### 10.3 Mitigação
-
-Se `cmMode` for `prioMRO` ou `prioMLB`, a decisão do xApp **não** prioritário envolvida em cada conflito é descartada:
-
-```cpp
-if (m_cfg.cmMode == CmMode::PrioMro)
-{
-    if (da.source != "MRO") dropped[idxs[a]] = true;
-    if (db.source != "MRO") dropped[idxs[b]] = true;
-}
-```
-
-Em `cmMode == none`, os conflitos são detectados e contabilizados, mas **nenhuma** decisão é descartada — reproduzindo o baseline "sem CMF" do artigo (`no_CM`).
-
-### 10.4 Detecção implícita (ImCD)
-
-`CollectKpis()` (linha ~1595) monitora, a cada segundo, a satisfação média de usuários. Se ela cair mais que `imcdDegradationThreshold` (2% por padrão) em relação à leitura anterior, **e** a rodada de controle mais recente tiver tido mais de um xApp atuando na mesma célula, um conflito **implícito** é registrado (`ReportImplicitConflict()`, linha ~1573) — não porque os parâmetros colidiram sintaticamente, mas porque o efeito combinado prejudicou um KPI monitorado.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ---
 
@@ -409,7 +358,6 @@ bs.ricOwned.insert(d.parameter);
 
 e `RunXapps()` para de gerar decisões da emulação interna para aquele parâmetro naquela célula (`if (bs.ricOwned.count(RanParameter::Cio) == 0) { ... }`). Isso permite:
 
-<<<<<<< HEAD
 - rodar o cenário **totalmente offline** (`--useE2=0`), sem depender de infraestrutura externa — sem `xapp-CMF`, nada mitiga conflitos nesse modo, é equivalente ao baseline "CM disabled" do artigo; é assim que os CSVs de validação deste documento foram gerados;
 - rodar com **um RIC real** e xApps MRO/MLB reais controlando algumas ou todas as células, sem que a emulação interna "brigue" com o xApp de verdade pelo mesmo parâmetro;
 - misturar os dois: por exemplo, um xApp MRO real no RIC e a emulação interna cobrindo o MLB, testando a integração incremental de um xApp por vez.
@@ -417,15 +365,6 @@ e `RunXapps()` para de gerar decisões da emulação interna para aquele parâme
 Toda decisão de um xApp real, decodificada aqui, é aplicada diretamente — a arbitragem entre decisões conflitantes já aconteceu antes, no [`xapp-CMF`](../../../xapp-CMF), que os xApps MRO/MLB consultam antes de sequer enviar o RIC Control Request.
 
 > **Nota de verificação**: o laço fim-a-fim contra um Near-RT RIC real com os xApps MRO e MLB deste projeto foi exercitado e validado em sessões posteriores (ver os READMEs de [`xapp-MRO`](../../../xapp-MRO/README.md) e [`xapp-MLB`](../../../xapp-MLB/README.md)); o caminho offline (`--useE2=0`) foi validado numericamente contra os CSVs de referência (seção 15).
-=======
-- rodar o cenário **totalmente offline** (`--useE2=0`), reproduzindo os três modos do artigo sem depender de infraestrutura externa — é assim que os CSVs de validação deste documento foram gerados;
-- rodar com **um RIC real** e xApps MRO/MLB reais controlando algumas ou todas as células, sem que a emulação interna "brigue" com o xApp de verdade pelo mesmo parâmetro;
-- misturar os dois: por exemplo, um xApp MRO real no RIC e a emulação interna cobrindo o MLB, testando a integração incremental de um xApp por vez.
-
-Toda decisão que chega via E2 passa pelo mesmo `DetectAndMitigate()` usado pela emulação interna — a interação com um xApp real está sujeita ao mesmo CMF.
-
-> **Nota de verificação**: este exemplo foi validado subindo e testando a inicialização da pilha E2 (conexão SCTP tentada corretamente), mas o laço fim-a-fim contra um Near-RT RIC real com xApps MRO/MLB publicados **não foi exercitado**, por não haver tais xApps disponíveis neste ambiente. O caminho offline (`--useE2=0`), por outro lado, foi validado numericamente contra os CSVs de referência (seção 15).
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ---
 
@@ -447,31 +386,9 @@ Toda decisão que chega via E2 passa pelo mesmo `DetectAndMitigate()` usado pela
 | `bs-<id>.csv` | `time, current bs, availability, cio, hyst, ttt` | 1 s | Série temporal por célula dos três parâmetros disputados. |
 | `summary.txt` | — | fim da execução | Resumo agregado (ver `WriteSummary()`, linha ~1695), também impresso no terminal. |
 
-<<<<<<< HEAD
 ### 12.2 Log de conflitos
 
 Não existe mais aqui: `nori-cmf.cc` não detecta conflitos, então não há `conflicts.json` neste diretório de saída. O log equivalente (`/tmp/conflicts.json`, formato *JSON Lines* no mesmo esquema `json_messages/{ICD,DCD,ImCD}/*signal conflict.json` do repositório de referência) agora é escrito pelo [`xapp-CMF`](../../../xapp-CMF), dentro do seu próprio pod — veja `_log_conflict()`/`_on_implicit_conflict()` em `xapp-CMF/src/custom_xapp.py`.
-=======
-### 12.2 `conflicts.json`
-
-Um objeto JSON por linha (formato *JSON Lines*), cada um reproduzindo exatamente o esquema dos arquivos `json_messages/{ICD,DCD}/*signal conflict.json` do repositório de referência:
-
-```json
-{"source":"ICD","command":"Notify","conflictType":"indirect",
- "timestamp":"Wed Jan 01 00:00:11.000 2020",
- "groupName":"CellAffectHandoverBoundary",
- "decisions":[
-   {"content":{"source":"MRO","command":"Modify","targetParameter":"HOTimeToTrigger",
-               "targetValue":"0.256","targetCell":"000-000-000-000006",
-               "timestamp":"Wed Jan 01 00:00:11.000 2020","controlTimespan":"500"}},
-   {"content":{"source":"MLB","command":"Modify","targetParameter":"HOMeasurementOffset",
-               "targetValue":"3","targetCell":"000-000-000-000006",
-               "timestamp":"Wed Jan 01 00:00:11.000 2020","controlTimespan":"500"}}
- ]}
-```
-
-Conflitos implícitos usam o esquema de `json_messages/ImCD/*signal conflict.json`, com o campo adicional `degradKPI`.
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ---
 
@@ -486,21 +403,13 @@ Todos os parâmetros abaixo são definidos em `CmfConfig` (linha ~127) e exposto
 | `--kpiPeriod` | 1 | Período de coleta de KPIs, em segundos. |
 | `--controlPeriod` | 1 | Período do laço de controle dos xApps, em segundos. |
 | `--warmupTime` | 150 | Tempo inicial descartado das médias finais. |
-<<<<<<< HEAD
-=======
-| `--cmMode` | `none` | Modo de mitigação: `none`, `prioMRO` ou `prioMLB`. |
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 | `--nUe` | 380 | Número de usuários equipamentos. |
 | `--isd` | 1200 | Distância entre estações-base, em metros. |
 | `--rxSensitivity` | -120 | Sensibilidade do receptor do UE, em dBm (por PRB). |
 | `--rlfSinrThreshold` | -18 | SINR abaixo da qual o enlace é considerado em falha, em dB. |
 | `--pingPongPeriod` | 10 | Janela de detecção de ping-pong, em segundos. |
 | `--mroWindow` | 240 | Janela estatística do xApp MRO, em segundos. |
-<<<<<<< HEAD
 | `--outputDir` | `cmf-output` | Diretório de saída dos CSVs. |
-=======
-| `--outputDir` | `cmf-output` | Diretório de saída dos CSVs e do log de conflitos. |
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 | `--rngSeed` | 1 | Semente do gerador de números aleatórios. |
 | `--rngRun` | 1 | Número de execução (RNG run) do ns-3. |
 | `--useE2` | `true` | Conecta cada célula ao Near-RT RIC via E2. |
@@ -523,7 +432,6 @@ cd ~/ns-3-dev
 ### 14.1 Execução offline (recomendada para reprodução dos resultados)
 
 ```bash
-<<<<<<< HEAD
 ./ns3 run "nori-cmf -- --useE2=0 --simTime=1000 --outputDir=/tmp/cmf-none"
 ```
 
@@ -532,16 +440,6 @@ Sem `xapp-CMF` (que só existe no caminho E2), este modo sempre se comporta como
 Ou, usando o script auxiliar [`run_nori_cmf.sh`](../../../run_nori_cmf.sh) na raiz do repositório ns-3:
 
 ```bash
-=======
-./ns3 run "nori-cmf -- --useE2=0 --cmMode=none --simTime=1000 --outputDir=/tmp/cmf-none"
-```
-
-Ou, usando o script auxiliar [`run_nori_cmf.sh`](../../../run_nori_cmf.sh) na raiz do repositório ns-3:
-
-```bash
-./run_nori_cmf.sh --cm-mode prioMRO
-./run_nori_cmf.sh --all-modes                 # roda none, prioMRO e prioMLB em sequência
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 ./run_nori_cmf.sh --sim-time 200 --warmup-time 50 --output-dir /tmp/teste
 ```
 
@@ -615,7 +513,6 @@ Referência rápida de onde encontrar cada assunto dentro de [`nori-cmf.cc`](../
 
 | Assunto | Função / struct | Linha aprox. |
 |---|---|---|
-<<<<<<< HEAD
 | Constantes do cenário | `N_BS`, `PRB_PER_CELL`, ... | 87 |
 | Configuração via linha de comando | `struct CmfConfig` | 111 |
 | Pathloss / LOS UMa 38.901 | `UmaLosProbability`, `UmaPathloss` | 211, 222 |
@@ -640,33 +537,6 @@ Referência rápida de onde encontrar cada assunto dentro de [`nori-cmf.cc`](../
 | Ponto de entrada | `main` | 1655 |
 
 O CD Agent, o CR Agent e o PMon (DCD/ICD/ImCD) não estão mais neste arquivo — veja o mapa de código de [`xapp-CMF`](../../../xapp-CMF) (`src/cd_agent.py`, `src/cr_agent.py`, `src/pmon.py`, `src/custom_xapp.py`).
-=======
-| Constantes do cenário | `N_BS`, `PRB_PER_CELL`, ... | 79 |
-| Configuração via linha de comando | `struct CmfConfig` | 127 |
-| Pathloss / LOS UMa 38.901 | `UmaLosProbability`, `UmaPathloss` | 232, 243 |
-| Tabelas de decisão MRO/MLB | `PingPongRatioToTtt`, `RlfRatioToHysteresis`, `LoadToCio` | 293–332 |
-| Grupos de parâmetros (ICD) | `PARAMETER_GROUPS`, `GroupOf` | 351, 356 |
-| Serialização JSON | `DecisionToJson`, `FormatTimestamp` | 399, 379 |
-| Índice de Jain | `JainFairness` | 435 |
-| Estado da célula | `struct BaseStation` | 455 |
-| Estado do usuário | `struct UserEquipment` | 501 |
-| Construção do cenário | `BuildBaseStations`, `BuildBoundary`, `BuildUsers` | 686, 719, 738 |
-| Potência recebida / SINR | `RxPowerDbm`, `UpdateRadio` | 899, 939 |
-| Mobilidade | `UpdateMobility` | 991 |
-| Liberação / RLF | `ReleaseExpiredConnections`, `DetectRadioLinkFailures` | 1031, 1053 |
-| Handover A3 | `EvaluateHandovers`, `RecordHandover` | 1151, 1106 |
-| Admissão / bloqueio | `HandleConnectionAttempts` | 1219 |
-| Alocação de PRBs | `AllocateResources` | 1290 |
-| Laço de controle / xApps | `RunXapps` | 1372 |
-| Detecção e mitigação (CMF) | `DetectAndMitigate`, `ApplyDecision` | 1433, 1518 |
-| Relato de conflitos | `ReportConflict`, `ReportImplicitConflict` | 1550, 1573 |
-| Coleta de KPIs / ImCD | `CollectKpis` | 1595 |
-| Resumo final | `WriteSummary` | 1695 |
-| Setup E2 por célula | `SetupE2Terminations` | 844 |
-| Indicação KPM | `KpmSubscriptionCallback`, `SendKpmIndication` | 1739, 1749 |
-| Comando RIC Control | `RicControlCallback`, `ApplyRicDecision` | 1850, 1907 |
-| Ponto de entrada | `main` | 1940 |
->>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ---
 
