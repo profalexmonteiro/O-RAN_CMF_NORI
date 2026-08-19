@@ -1,0 +1,2126 @@
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index 8e93188..95b372a 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -3,6 +3,7 @@ set(base_examples
+     #oran-interface-example
+     nori-mimo-demo
+     nori-simple-rl-sched
++    nori-cmf
+ )
+ 
+ foreach(
+diff --git a/examples/nori-cmf.cc b/examples/nori-cmf.cc
+new file mode 100644
+index 0000000..4960fac
+--- /dev/null
++++ b/examples/nori-cmf.cc
+@@ -0,0 +1,2010 @@
++/* -*-  Mode: C++; c-file-style: "gnu"; indent-tabs-mode:nil; -*- */
++
++// SPDX-License-Identifier: GPL-2.0-only
++
++/**
++ * @ingroup examples
++ * @file nori-cmf.cc
++ * @brief O-RAN Conflict Mitigation Framework (CMF) scenario.
++ *
++ * System-level reimplementation of the scenario documented in
++ * https://github.com/czezy/O-RAN_CMF_CM2023 (Conflict Mitigation Framework and
++ * Conflict Detection in O-RAN nRT-RIC, IEEE ComMag 2023). That repository ships
++ * the scenario description, the ICD/DCD/ImCD JSON message formats and the raw
++ * result files, but no source code, so the model below is rebuilt from the
++ * written specification and calibrated against the published CSV results (see
++ * "Calibration" notes next to each constant).
++ *
++ * Two xApps run simultaneously and fight over the handover boundary of every
++ * cell:
++ *   - MRO (Mobility Robustness Optimization) writes Hysteresis and
++ *     Time-To-Trigger, driven by the ping-pong and radio-link-failure ratios;
++ *   - MLB (Mobility Load Balancing) writes the Cell Individual Offset, driven
++ *     by the PRB utilisation of the cell.
++ *
++ * Because HOMeasurementOffset (CIO), HOHysteresis and HOTimeToTrigger all
++ * belong to the "CellAffectHandoverBoundary" parameter group, simultaneous
++ * decisions from the two xApps are an *indirect* conflict in the CMF taxonomy.
++ * The framework is exercised in the three modes of the paper, selected with
++ * --cmMode:
++ *   - none     : conflicts are neither detected nor mitigated;
++ *   - prioMRO  : on conflict the MRO decision wins and MLB's is dropped;
++ *   - prioMLB  : on conflict the MLB decision wins and MRO's is dropped.
++ *
++ * Every cell is a real E2 node: an ns3::E2Termination is created per base
++ * station and connects to the Near-RT RIC given by --ipE2TermRic, registering
++ * the KPM (RAN function 200) and RIC Control (RAN function 300) service
++ * models. Cell KPIs are streamed to the RIC as KPM indications, and RIC Control
++ * requests coming from real xApps are decoded and applied to the cell. When no
++ * xApp on the RIC drives a given parameter, the built-in MRO/MLB emulation
++ * keeps the control loop running so that the scenario is reproducible offline
++ * (--useE2=0), which is also how the CSV results are generated.
++ *
++ * Usage:
++ *   ./ns3 run "nori-cmf -- --ipE2TermRic=10.244.0.108 --cmMode=prioMRO"
++ *   ./ns3 run "nori-cmf -- --useE2=0 --cmMode=none --simTime=1000"
++ */
++
++#include "ns3/core-module.h"
++// nori-module.h holds Ptr<> members of NR RRC types, so the NR module headers
++// have to be visible here as well.
++#include "ns3/nr-module.h"
++#include "ns3/nori-module.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <ctime>
++#include <deque>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <map>
++#include <set>
++#include <sstream>
++#include <string>
++#include <vector>
++
++using namespace ns3;
++
++NS_LOG_COMPONENT_DEFINE("NoriCmf");
++
++namespace
++{
++
++// ===========================================================================
++// Scenario constants
++// ===========================================================================
++
++/// Number of base stations of the hexagonal deployment (rows of 3-4-5-4-3).
++constexpr uint32_t N_BS = 19;
++/// PRBs per cell. Calibration: the published per-cell "availability" traces
++/// take exactly 101 distinct values in [0, 1], i.e. a 100 PRB grid.
++constexpr uint32_t PRB_PER_CELL = 100;
++/// PRB bandwidth: 12 subcarriers x 15 kHz.
++constexpr double PRB_BANDWIDTH_HZ = 12 * 15e3;
++/// PLMN identity used for every E2 node, as in the other nori examples.
++const std::string PLMN_ID = "111";
++/// RAN function IDs registered towards the RIC.
++constexpr long RAN_FUNCTION_KPM = 200;
++constexpr long RAN_FUNCTION_RC = 300;
++
++// ===========================================================================
++// Configuration
++// ===========================================================================
++
++/// Conflict mitigation mode, matching the three result sets of the paper.
++enum class CmMode
++{
++    None,    //!< "no_CM"
++    PrioMro, //!< "prio_MRO"
++    PrioMlb  //!< "prio_MLB"
++};
++
++/// RAN parameters the two xApps compete for.
++enum class RanParameter
++{
++    Cio,          //!< HOMeasurementOffset, written by MLB
++    Hysteresis,   //!< HOHysteresis, written by MRO
++    TimeToTrigger //!< HOTimeToTrigger, written by MRO
++};
++
++std::string
++ParameterName(RanParameter p)
++{
++    switch (p)
++    {
++    case RanParameter::Cio:
++        return "HOMeasurementOffset";
++    case RanParameter::Hysteresis:
++        return "HOHysteresis";
++    case RanParameter::TimeToTrigger:
++        return "HOTimeToTrigger";
++    }
++    return "Unknown";
++}
++
++struct CmfConfig
++{
++    // --- simulation control ---
++    double simTime{1000.0};  //!< total simulated time [s]
++    double stepTime{0.05};   //!< UE position/measurement update period [s]
++    double kpiPeriod{1.0};   //!< KPI polling period [s]
++    double controlPeriod{1.0}; //!< xApp decision period [s]
++    double warmupTime{150.0};  //!< discarded from the final averages [s]
++    uint32_t rngSeed{1};
++    uint32_t rngRun{1};
++    CmMode cmMode{CmMode::None};
++    std::string outputDir{"cmf-output"};
++
++    // --- deployment ---
++    uint32_t nUe{380};       //!< 20 UEs per base station
++    double isd{1200.0};      //!< inter-site distance [m], see BuildBaseStations()
++    Vector gridCentre{1000.0, 1000.0, 0.0}; //!< reference frame of the paper figures
++
++    // --- base station radio ---
++    /// Transmit power per PRB [dBm]. The reference README quotes 28 dBm; taken
++    /// as the power spectral density reference (i.e. the RSRP-defining power,
++    /// 48 dBm over the whole 20 MHz carrier) it produces a macro link budget
++    /// that closes, whereas 28 dBm spread over 20 MHz leaves the entire
++    /// deployment below the thermal noise floor.
++    double bsTxPowerDbm{28.0};
++    double bsAntennaGainDb{2.0};
++    double bsCableLossDb{2.0};
++    double bsHeight{10.0};
++    double centreFrequencyHz{2100e6};
++    double bandwidthHz{20e6};
++
++    // --- user equipment radio ---
++    double ueAntennaGainDb{0.0};
++    double ueCableLossDb{0.0};
++    double ueHeight{1.6};
++    uint32_t mimoStreams{2};      //!< 2x2 MIMO
++    double mimoSinrThresholdDb{6.0}; //!< rank-2 is only used above this SINR
++    double noiseFigureDb{7.0};
++    /// Receiver sensitivity, per PRB. NOTE: the reference README states
++    /// -80 dBm, which under 38.901 UMa at 2.1 GHz puts the whole deployment out
++    /// of coverage, so the usable default is the reference sensitivity of a
++    /// 2.1 GHz macro receiver over one PRB. Left configurable.
++    double rxSensitivityDbm{-120.0};
++
++    // --- 38.901 UMa margins, as listed in the reference README ---
++    double bodyLossDb{1.0};
++    double slowFadingMarginDb{4.0};
++    double foliageLossDb{4.0};
++    double interferenceMarginDb{2.0};
++    double rainMarginDb{0.0};
++    /// Spatial correlation distance of the LOS/NLOS state [m] (38.901: 50 m).
++    double losCorrelationDistance{50.0};
++    /// Upper bound of the per-stream spectral efficiency (3GPP CQI table 2).
++    double maxSpectralEfficiency{5.5547};
++
++    // --- mobility ---
++    double pedestrianShare{0.8};
++    double pedestrianSpeed{5.0};
++    double vehicleSpeed{25.0};
++    double directionChangeProb{0.0006}; //!< 0.06 % per position update
++
++    // --- traffic ---
++    double attemptIntervalMean{20.0};
++    double attemptIntervalStd{3.0};
++    double connectionDurationMean{60.0};
++    double connectionDurationStd{15.0};
++    /// User profiles: demanded bitrate [bps] and assignment probability.
++    double profileLowBps{96e3};
++    double profileMediumBps{5000e3};
++    double profileHighBps{24000e3};
++    double profileLowProb{0.6};
++    double profileMediumProb{0.3};
++
++    // --- handover / mobility robustness ---
++    double defaultCio{0.0};
++    double defaultHysteresis{1.0};    //!< lowest value the MRO table can emit
++    double defaultTtt{0.08};          //!< lowest value the MRO table can emit
++    double pingPongPeriod{10.0};      //!< [s]
++    double mroWindow{240.0};          //!< statistics window of the MRO xApp [s]
++    /// Qout-like threshold. The deployment uses full frequency reuse without
++    /// sectorisation, so cell-edge SINR is deeply negative; the value is
++    /// calibrated on the published rlf traces, whose conn_sinr median is
++    /// -17.4 dB.
++    double rlfSinrThresholdDb{-18.0};
++    double rlfTimer{1.0};             //!< time below the threshold before an RLF [s]
++    uint32_t admissionCandidates{3};  //!< cells tried before declaring a blockade
++
++    // --- conflict mitigation framework ---
++    double controlTimespanMs{500.0};  //!< validity window of a decision, as in the ICD messages
++    double imcdDegradationThreshold{0.02}; //!< relative KPI drop flagged by the ImCD
++
++    // --- E2 / Near-RT RIC ---
++    bool useE2{true};
++    std::string ricIp{"10.244.0.108"};
++    uint16_t ricPort{36422};
++    uint16_t e2LocalPort{38470};
++    double e2Periodicity{1.0}; //!< KPM indication period [s]
++};
++
++// ===========================================================================
++// Radio model (3GPP TR 38.901, urban macro)
++// ===========================================================================
++
++/// TR 38.901 Table 7.4.2-1, UMa LOS probability for hUT < 13 m.
++double
++UmaLosProbability(double d2d)
++{
++    if (d2d <= 18.0)
++    {
++        return 1.0;
++    }
++    return 18.0 / d2d + std::exp(-d2d / 63.0) * (1.0 - 18.0 / d2d);
++}
++
++/// TR 38.901 Table 7.4.1-1, UMa pathloss [dB].
++double
++UmaPathloss(double d2d, double hBs, double hUt, double fcGhz, bool los)
++{
++    d2d = std::max(d2d, 10.0); // the model is only defined from 10 m on
++    const double dh = hBs - hUt;
++    const double d3d = std::sqrt(d2d * d2d + dh * dh);
++    // Effective environment height, 1 m for hUT below 13 m.
++    const double hE = 1.0;
++    const double dBp = 4.0 * (hBs - hE) * (hUt - hE) * (fcGhz * 1e9) / 3e8;
++
++    double plLos;
++    if (d2d <= dBp)
++    {
++        plLos = 28.0 + 22.0 * std::log10(d3d) + 20.0 * std::log10(fcGhz);
++    }
++    else
++    {
++        plLos = 28.0 + 40.0 * std::log10(d3d) + 20.0 * std::log10(fcGhz) -
++                9.0 * std::log10(dBp * dBp + dh * dh);
++    }
++    if (los)
++    {
++        return plLos;
++    }
++    const double plNlos =
++        13.54 + 39.08 * std::log10(d3d) + 20.0 * std::log10(fcGhz) - 0.6 * (hUt - 1.5);
++    return std::max(plLos, plNlos);
++}
++
++double
++DbToLin(double db)
++{
++    return std::pow(10.0, db / 10.0);
++}
++
++double
++LinToDb(double lin)
++{
++    return 10.0 * std::log10(std::max(lin, 1e-30));
++}
++
++// ===========================================================================
++// xApp decision tables
++// ===========================================================================
++//
++// The three tables below are the ones published in the reference README. Each
++// of them gets one extra step, used when the ratio saturates at exactly 100 %:
++// the published per-cell traces contain a CIO of 3.5 dB, a hysteresis of 10 dB
++// and a TTT of 5.12 s, none of which appear in the tables themselves.
++
++/// MRO: ping-pong-to-handover ratio -> Time-To-Trigger [s].
++double
++PingPongRatioToTtt(double ratio)
++{
++    static const double kTtt[16] = {0.08,
++                                    0.08,
++                                    0.08,
++                                    0.08, // 0 - 26.67 %
++                                    0.1,
++                                    0.128,
++                                    0.16,
++                                    0.256,
++                                    0.32,
++                                    0.48,
++                                    0.512,
++                                    0.64,
++                                    1.024,
++                                    1.28,
++                                    2.56,
++                                    5.12}; // ratio == 100 %
++    const int idx = std::min(std::max(static_cast<int>(std::floor(ratio * 15.0)), 0), 15);
++    return kTtt[idx];
++}
++
++/// MRO: RLF-to-handover ratio -> hysteresis [dB].
++double
++RlfRatioToHysteresis(double ratio)
++{
++    // 0 - 15 % maps to 1 dB, then +0.5 dB every 5 %.
++    const int idx = std::min(std::max(static_cast<int>(std::floor(ratio * 20.0)), 0), 20);
++    return 1.0 + 0.5 * std::max(0, idx - 2);
++}
++
++/// MLB: cell load -> Cell Individual Offset [dB].
++double
++LoadToCio(double load)
++{
++    // 0 - 45.45 % maps to 0 dB, then +0.5 dB every 9.09 % (1/11).
++    const int idx = std::min(std::max(static_cast<int>(std::floor(load * 11.0)), 0), 11);
++    return 0.5 * std::max(0, idx - 4);
++}
++
++// ===========================================================================
++// CMF data model
++// ===========================================================================
++
++/// A single xApp control decision, i.e. the payload of an E2 Control message.
++struct ControlDecision
++{
++    std::string source;       //!< originating xApp
++    uint32_t cellId{0};       //!< target cell
++    RanParameter parameter{RanParameter::Cio};
++    double value{0.0};
++    double timestamp{0.0};    //!< simulated time the decision was issued [s]
++    double controlTimespanMs{500.0};
++};
++
++/// Parameter groups of the ICD, extended with the two MRO parameters. Two xApps
++/// writing different members of the same group are an indirect conflict.
++const std::map<std::string, std::set<RanParameter>> PARAMETER_GROUPS = {
++    {"CellAffectHandoverBoundary",
++     {RanParameter::Cio, RanParameter::Hysteresis, RanParameter::TimeToTrigger}}};
++
++std::string
++GroupOf(RanParameter p)
++{
++    for (const auto& [name, members] : PARAMETER_GROUPS)
++    {
++        if (members.count(p) > 0)
++        {
++            return name;
++        }
++    }
++    return "";
++}
++
++/// Formats a cell id the way the reference JSON messages do.
++std::string
++FormatCellId(uint32_t cellId)
++{
++    std::ostringstream os;
++    os << "000-000-000-" << std::setw(6) << std::setfill('0') << cellId;
++    return os.str();
++}
++
++/// Wall-clock-looking timestamp, e.g. "Wed Jan 01 00:00:00.000 2020".
++std::string
++FormatTimestamp(double simTimeSec, std::time_t epoch)
++{
++    const double whole = std::floor(simTimeSec);
++    std::time_t t = epoch + static_cast<std::time_t>(whole);
++    int ms = static_cast<int>(std::llround((simTimeSec - whole) * 1000.0));
++    if (ms > 999)
++    {
++        ms = 999;
++    }
++    std::tm tmv{};
++    gmtime_r(&t, &tmv);
++    char date[64];
++    std::strftime(date, sizeof(date), "%a %b %d %H:%M:%S", &tmv);
++    char out[96];
++    std::snprintf(out, sizeof(out), "%s.%03d %d", date, ms, 1900 + tmv.tm_year);
++    return std::string(out);
++}
++
++/// Serialises a decision as the "content" object of the reference messages.
++std::string
++DecisionToJson(const ControlDecision& d, std::time_t epoch)
++{
++    std::ostringstream os;
++    os << "{\"source\":\"" << d.source << "\",\"command\":\"Modify\",\"targetParameter\":\""
++       << ParameterName(d.parameter) << "\",\"targetValue\":\"" << d.value << "\",\"targetCell\":\""
++       << FormatCellId(d.cellId) << "\",\"timestamp\":\"" << FormatTimestamp(d.timestamp, epoch)
++       << "\",\"controlTimespan\":\"" << static_cast<long>(d.controlTimespanMs) << "\"}";
++    return os.str();
++}
++
++// ===========================================================================
++// Geometry helpers
++// ===========================================================================
++
++/// Ray-casting point-in-polygon test.
++bool
++InsidePolygon(const std::vector<Vector>& poly, const Vector& p)
++{
++    bool inside = false;
++    const size_t n = poly.size();
++    for (size_t i = 0, j = n - 1; i < n; j = i++)
++    {
++        const double xi = poly[i].x;
++        const double yi = poly[i].y;
++        const double xj = poly[j].x;
++        const double yj = poly[j].y;
++        if (((yi > p.y) != (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi))
++        {
++            inside = !inside;
++        }
++    }
++    return inside;
++}
++
++/// Jain's fairness index; NaN when every sample is zero.
++double
++JainFairness(const std::vector<double>& x)
++{
++    double sum = 0.0;
++    double sumSq = 0.0;
++    for (double v : x)
++    {
++        sum += v;
++        sumSq += v * v;
++    }
++    if (sumSq <= 0.0)
++    {
++        return std::numeric_limits<double>::quiet_NaN();
++    }
++    return (sum * sum) / (static_cast<double>(x.size()) * sumSq);
++}
++
++// ===========================================================================
++// Simulation entities
++// ===========================================================================
++
++struct BaseStation
++{
++    uint32_t id{0}; //!< cell id, 1-based
++    Vector pos;
++
++    double cio{0.0};
++    double hysteresis{1.0};
++    double ttt{0.08};
++
++    uint32_t prbUsed{0};
++    double loadPrevStep{0.0}; //!< used to weight the inter-cell interference
++
++    // Rolling event windows feeding the MRO xApp.
++    std::deque<double> hoWindow;
++    std::deque<double> ppWindow;
++    std::deque<double> rlfWindow;
++
++    // Cumulative counters.
++    uint64_t hoTotal{0};
++    uint64_t ppTotal{0};
++    uint64_t rlfTotal{0};
++
++    // E2 state.
++    Ptr<E2Termination> e2Term;
++    bool e2Subscribed{false};
++    E2Termination::RicSubscriptionRequest_rval_s e2SubParams{};
++    /// Parameters currently owned by a real xApp on the RIC; the built-in
++    /// MRO/MLB emulation stops writing those.
++    std::set<RanParameter> ricOwned;
++
++    double Load() const
++    {
++        return static_cast<double>(prbUsed) / PRB_PER_CELL;
++    }
++
++    double Availability() const
++    {
++        return 1.0 - Load();
++    }
++
++    uint32_t FreePrbs() const
++    {
++        return PRB_PER_CELL - std::min(prbUsed, PRB_PER_CELL);
++    }
++};
++
++struct UserEquipment
++{
++    uint32_t id{0};
++    Vector pos;
++    double direction{0.0}; //!< [rad]
++    double speed{0.0};
++    uint8_t profile{0}; //!< 0 low, 1 medium, 2 high
++    double demandBps{0.0};
++
++    int32_t servingBs{-1}; //!< index into the BS vector, -1 when idle
++    int32_t previousBs{-1};
++    double lastHoTime{-1e9};
++
++    double connectionEnd{0.0};
++    double nextAttempt{0.0};
++
++    uint32_t prbNeeded{0};
++    uint32_t prbAllocated{0};
++    double satisfaction{0.0};
++    double connSinrDb{-1e9};
++
++    int32_t a3Target{-1}; //!< cell currently satisfying the A3 entering condition
++    double a3Since{0.0};
++    double lowSinrSince{-1.0}; //!< start of the current sub-threshold period
++
++    // Per-BS LOS state, redrawn once the UE moved past the correlation distance.
++    std::vector<char> los;
++    Vector losRefPos;
++};
++
++// ===========================================================================
++// The scenario
++// ===========================================================================
++
++class CmfSimulation
++{
++  public:
++    explicit CmfSimulation(const CmfConfig& cfg);
++
++    void Setup();
++    void Run();
++
++  private:
++    // --- construction ---
++    void BuildBaseStations();
++    void BuildBoundary();
++    void BuildUsers();
++    void OpenTraceFiles();
++    void SetupE2Terminations();
++
++    // --- main loop ---
++    void Step();
++    void UpdateMobility();
++    void UpdateRadio();
++    void ReleaseExpiredConnections();
++    void DetectRadioLinkFailures();
++    void EvaluateHandovers();
++    void HandleConnectionAttempts();
++    void AllocateResources();
++
++    // --- control loop ---
++    void RunXapps();
++    std::vector<ControlDecision> DetectAndMitigate(std::vector<ControlDecision> pending);
++    void ApplyDecision(const ControlDecision& d);
++    void ReportConflict(const std::string& detector,
++                        const std::string& conflictType,
++                        const std::string& groupName,
++                        const std::vector<ControlDecision>& decisions);
++    void ReportImplicitConflict(const std::string& kpiName,
++                                const std::vector<ControlDecision>& decisions);
++
++    // --- reporting ---
++    void CollectKpis();
++    void WriteSummary();
++
++    // --- E2 ---
++    void KpmSubscriptionCallback(uint32_t bsIdx, E2AP_PDU_t* pdu);
++    void RicControlCallback(uint32_t bsIdx, E2AP_PDU_t* pdu);
++    void SendKpmIndication(uint32_t bsIdx);
++    void ApplyRicDecision(ControlDecision d);
++
++    // --- helpers ---
++    double Now() const
++    {
++        return Simulator::Now().GetSeconds();
++    }
++
++    void PruneWindow(std::deque<double>& w, double now) const
++    {
++        while (!w.empty() && w.front() < now - m_cfg.mroWindow)
++        {
++            w.pop_front();
++        }
++    }
++
++    /// Per-PRB received power [dBm] of cell bsIdx at UE ue, including all margins.
++    double RxPowerDbm(const UserEquipment& ue, uint32_t bsIdx) const;
++    /// Number of PRBs needed by ue to reach its demanded bitrate at sinrDb.
++    uint32_t PrbsNeeded(double demandBps, double sinrDb) const;
++    double SpectralEfficiency(double sinrDb) const;
++    void RecordHandover(UserEquipment& ue, int32_t fromBs, int32_t toBs);
++
++    CmfConfig m_cfg;
++    std::vector<BaseStation> m_bs;
++    std::vector<UserEquipment> m_ue;
++    std::vector<Vector> m_boundary;
++
++    // Per-step scratch buffers: received power and SINR of every UE/BS pair.
++    std::vector<double> m_rxPowerDbm; //!< size nUe * N_BS
++    std::vector<double> m_sinrDb;     //!< size nUe * N_BS
++
++    // Random variables.
++    Ptr<UniformRandomVariable> m_uniform;
++    Ptr<NormalRandomVariable> m_attemptRv;
++    Ptr<NormalRandomVariable> m_durationRv;
++
++    // Trace files.
++    std::ofstream m_availFile;
++    std::ofstream m_satisFile;
++    std::ofstream m_lbFile;
++    std::ofstream m_cbFile;
++    std::ofstream m_rlfFile;
++    std::ofstream m_hoFile;
++    std::ofstream m_ppFile;
++    std::ofstream m_conflictFile;
++    std::vector<std::ofstream> m_bsFiles;
++
++    // Aggregate counters.
++    uint64_t m_callBlockades{0};
++    uint64_t m_handovers{0};
++    uint64_t m_pingPongs{0};
++    uint64_t m_rlfs{0};
++    uint64_t m_directConflicts{0};
++    uint64_t m_indirectConflicts{0};
++    uint64_t m_implicitConflicts{0};
++    uint64_t m_droppedDecisions{0};
++
++    // Post-warmup accumulators.
++    double m_availAcc{0.0};
++    double m_satisAcc{0.0};
++    double m_lbAcc{0.0};
++    uint64_t m_availSamples{0};
++    uint64_t m_satisSamples{0};
++    uint64_t m_lbSamples{0};
++    uint64_t m_cbAfterWarmup{0};
++    uint64_t m_hoAfterWarmup{0};
++    uint64_t m_ppAfterWarmup{0};
++    uint64_t m_rlfAfterWarmup{0};
++
++    // ImCD state.
++    double m_lastSatisfaction{std::numeric_limits<double>::quiet_NaN()};
++    std::vector<ControlDecision> m_lastRoundDecisions;
++
++    std::time_t m_epoch{0};
++};
++
++CmfSimulation::CmfSimulation(const CmfConfig& cfg)
++    : m_cfg(cfg)
++{
++    m_uniform = CreateObject<UniformRandomVariable>();
++
++    m_attemptRv = CreateObject<NormalRandomVariable>();
++    m_attemptRv->SetAttribute("Mean", DoubleValue(m_cfg.attemptIntervalMean));
++    m_attemptRv->SetAttribute("Variance",
++                              DoubleValue(m_cfg.attemptIntervalStd * m_cfg.attemptIntervalStd));
++
++    m_durationRv = CreateObject<NormalRandomVariable>();
++    m_durationRv->SetAttribute("Mean", DoubleValue(m_cfg.connectionDurationMean));
++    m_durationRv->SetAttribute(
++        "Variance",
++        DoubleValue(m_cfg.connectionDurationStd * m_cfg.connectionDurationStd));
++
++    // Fixed epoch so that the JSON timestamps are reproducible: 2020-01-01 UTC.
++    std::tm tmv{};
++    tmv.tm_year = 120;
++    tmv.tm_mon = 0;
++    tmv.tm_mday = 1;
++    m_epoch = timegm(&tmv);
++}
++
++// ---------------------------------------------------------------------------
++// Construction
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::BuildBaseStations()
++{
++    // Rows of 3-4-5-4-3 cells, reproducing figures/base_stations.png of the
++    // reference repository: columns are one ISD apart, rows are one ISD apart
++    // and every other row is shifted by half an ISD. NOTE: the reference README
++    // quotes 600 m between base stations while the published figure and the
++    // coordinate range of the published traces both show 1200 m; the figure is
++    // followed here and the value is exposed as --isd.
++    static const int kRowSize[5] = {3, 4, 5, 4, 3};
++
++    m_bs.clear();
++    uint32_t nextId = 1;
++    for (int r = 0; r < 5; ++r)
++    {
++        const int count = kRowSize[r];
++        const double y = m_cfg.gridCentre.y + (r - 2) * m_cfg.isd;
++        // Centre the row on the grid centre.
++        const double x0 = m_cfg.gridCentre.x - (count - 1) * 0.5 * m_cfg.isd;
++        for (int c = 0; c < count; ++c)
++        {
++            BaseStation bs;
++            bs.id = nextId++;
++            bs.pos = Vector(x0 + c * m_cfg.isd, y, m_cfg.bsHeight);
++            bs.cio = m_cfg.defaultCio;
++            bs.hysteresis = m_cfg.defaultHysteresis;
++            bs.ttt = m_cfg.defaultTtt;
++            m_bs.push_back(bs);
++        }
++    }
++    NS_ABORT_MSG_UNLESS(m_bs.size() == N_BS, "The hexagonal grid must hold 19 cells");
++}
++
++void
++CmfSimulation::BuildBoundary()
++{
++    // Hexagon approximating the coverage border, matching the figures: vertices
++    // at +/- 2.5 ISD on the x axis and +/- 2.5 ISD on the flat top/bottom edges.
++    const double cx = m_cfg.gridCentre.x;
++    const double cy = m_cfg.gridCentre.y;
++    const double rx = 2.5 * m_cfg.isd;
++    const double ry = 2.5 * m_cfg.isd;
++    const double flat = m_cfg.isd;
++
++    m_boundary = {Vector(cx + rx, cy, 0.0),
++                  Vector(cx + flat, cy + ry, 0.0),
++                  Vector(cx - flat, cy + ry, 0.0),
++                  Vector(cx - rx, cy, 0.0),
++                  Vector(cx - flat, cy - ry, 0.0),
++                  Vector(cx + flat, cy - ry, 0.0)};
++}
++
++void
++CmfSimulation::BuildUsers()
++{
++    const double minX = m_cfg.gridCentre.x - 2.5 * m_cfg.isd;
++    const double maxX = m_cfg.gridCentre.x + 2.5 * m_cfg.isd;
++    const double minY = m_cfg.gridCentre.y - 2.5 * m_cfg.isd;
++    const double maxY = m_cfg.gridCentre.y + 2.5 * m_cfg.isd;
++
++    m_ue.clear();
++    m_ue.reserve(m_cfg.nUe);
++    for (uint32_t i = 0; i < m_cfg.nUe; ++i)
++    {
++        UserEquipment ue;
++        ue.id = i;
++
++        // Rejection sampling inside the coverage polygon.
++        Vector p;
++        do
++        {
++            p = Vector(m_uniform->GetValue(minX, maxX),
++                       m_uniform->GetValue(minY, maxY),
++                       m_cfg.ueHeight);
++        } while (!InsidePolygon(m_boundary, p));
++        ue.pos = p;
++        ue.losRefPos = p;
++
++        ue.direction = m_uniform->GetValue(0.0, 2.0 * M_PI);
++        ue.speed = (m_uniform->GetValue() < m_cfg.pedestrianShare) ? m_cfg.pedestrianSpeed
++                                                                  : m_cfg.vehicleSpeed;
++
++        const double r = m_uniform->GetValue();
++        if (r < m_cfg.profileLowProb)
++        {
++            ue.profile = 0;
++            ue.demandBps = m_cfg.profileLowBps;
++        }
++        else if (r < m_cfg.profileLowProb + m_cfg.profileMediumProb)
++        {
++            ue.profile = 1;
++            ue.demandBps = m_cfg.profileMediumBps;
++        }
++        else
++        {
++            ue.profile = 2;
++            ue.demandBps = m_cfg.profileHighBps;
++        }
++
++        // Spread the first connection attempt over one mean inter-arrival time
++        // so that the network does not start with a synchronised burst.
++        ue.nextAttempt = m_uniform->GetValue(0.0, m_cfg.attemptIntervalMean);
++
++        ue.los.assign(N_BS, 0);
++        for (uint32_t b = 0; b < N_BS; ++b)
++        {
++            const double d2d = std::hypot(ue.pos.x - m_bs[b].pos.x, ue.pos.y - m_bs[b].pos.y);
++            ue.los[b] = (m_uniform->GetValue() < UmaLosProbability(d2d)) ? 1 : 0;
++        }
++
++        m_ue.push_back(ue);
++    }
++
++    m_rxPowerDbm.assign(static_cast<size_t>(m_cfg.nUe) * N_BS, -1e9);
++    m_sinrDb.assign(static_cast<size_t>(m_cfg.nUe) * N_BS, -1e9);
++}
++
++void
++CmfSimulation::OpenTraceFiles()
++{
++    const std::string dir = m_cfg.outputDir;
++    if (!dir.empty())
++    {
++        // ns-3 examples run from the source root; create the directory best-effort.
++        const std::string cmd = "mkdir -p '" + dir + "'";
++        if (std::system(cmd.c_str()) != 0)
++        {
++            NS_LOG_WARN("Could not create output directory " << dir);
++        }
++    }
++    const std::string prefix = dir.empty() ? "" : dir + "/";
++
++    auto open = [&prefix](std::ofstream& f, const std::string& name, const std::string& header) {
++        f.open(prefix + name);
++        NS_ABORT_MSG_IF(!f.is_open(), "Cannot open trace file " << prefix + name);
++        f << header << "\n";
++        f << std::setprecision(17);
++    };
++
++    open(m_availFile, "avail.csv", "time,availability");
++    open(m_satisFile, "satis.csv", "time,satisfaction");
++    open(m_lbFile, "lb.csv", "time,lb ratio");
++    open(m_cbFile, "cb.csv", "time,user,x pos,y pos");
++    open(m_rlfFile, "rlf.csv", "time,current bs,user,conn_sinr,x pos,y pos");
++    open(m_hoFile, "ho.csv", "time,previous bs,current bs,user,conn_sinr,x pos,y pos");
++    open(m_ppFile, "pp.csv", "time,current bs,user,conn_sinr,x pos,y pos,ho pp time");
++
++    m_conflictFile.open(prefix + "conflicts.json");
++    NS_ABORT_MSG_IF(!m_conflictFile.is_open(), "Cannot open the conflict log");
++
++    m_bsFiles.resize(N_BS);
++    for (uint32_t b = 0; b < N_BS; ++b)
++    {
++        open(m_bsFiles[b], "bs-" + std::to_string(m_bs[b].id) + ".csv",
++             "time,current bs,availability,cio,hyst,ttt");
++    }
++}
++
++void
++CmfSimulation::SetupE2Terminations()
++{
++    if (!m_cfg.useE2)
++    {
++        NS_LOG_INFO("E2 disabled, the built-in MRO/MLB emulation drives the control loop");
++        return;
++    }
++
++    for (uint32_t b = 0; b < N_BS; ++b)
++    {
++        BaseStation& bs = m_bs[b];
++        bs.e2Term = CreateObject<E2Termination>(
++            m_cfg.ricIp,
++            m_cfg.ricPort,
++            static_cast<uint16_t>(m_cfg.e2LocalPort + bs.id),
++            std::to_string(bs.id),
++            PLMN_ID);
++
++        Ptr<KpmFunctionDescription> kpmFd = Create<KpmFunctionDescription>();
++        bs.e2Term->RegisterKpmCallbackToE2Sm(
++            RAN_FUNCTION_KPM,
++            kpmFd,
++            std::bind(&CmfSimulation::KpmSubscriptionCallback, this, b, std::placeholders::_1));
++
++        Ptr<RicControlFunctionDescription> ricFd = Create<RicControlFunctionDescription>();
++        bs.e2Term->RegisterSmCallbackToE2Sm(
++            RAN_FUNCTION_RC,
++            ricFd,
++            std::bind(&CmfSimulation::RicControlCallback, this, b, std::placeholders::_1));
++
++        Simulator::Schedule(MicroSeconds(0), &E2Termination::Start, bs.e2Term);
++        NS_LOG_INFO("Cell " << bs.id << " will connect to the RIC at " << m_cfg.ricIp << ":"
++                            << m_cfg.ricPort);
++    }
++}
++
++void
++CmfSimulation::Setup()
++{
++    BuildBaseStations();
++    BuildBoundary();
++    BuildUsers();
++    OpenTraceFiles();
++    SetupE2Terminations();
++
++    Simulator::Schedule(Seconds(m_cfg.stepTime), &CmfSimulation::Step, this);
++    Simulator::Schedule(Seconds(m_cfg.kpiPeriod), &CmfSimulation::CollectKpis, this);
++    Simulator::Schedule(Seconds(m_cfg.controlPeriod), &CmfSimulation::RunXapps, this);
++}
++
++// ---------------------------------------------------------------------------
++// Radio
++// ---------------------------------------------------------------------------
++
++double
++CmfSimulation::RxPowerDbm(const UserEquipment& ue, uint32_t bsIdx) const
++{
++    const BaseStation& bs = m_bs[bsIdx];
++    const double d2d = std::hypot(ue.pos.x - bs.pos.x, ue.pos.y - bs.pos.y);
++    const double pl = UmaPathloss(d2d,
++                                  m_cfg.bsHeight,
++                                  m_cfg.ueHeight,
++                                  m_cfg.centreFrequencyHz / 1e9,
++                                  ue.los[bsIdx] != 0);
++    return m_cfg.bsTxPowerDbm + m_cfg.bsAntennaGainDb - m_cfg.bsCableLossDb +
++           m_cfg.ueAntennaGainDb - m_cfg.ueCableLossDb - pl - m_cfg.bodyLossDb -
++           m_cfg.slowFadingMarginDb - m_cfg.foliageLossDb - m_cfg.rainMarginDb;
++}
++
++double
++CmfSimulation::SpectralEfficiency(double sinrDb) const
++{
++    const uint32_t streams = (sinrDb >= m_cfg.mimoSinrThresholdDb) ? m_cfg.mimoStreams : 1;
++    const double perStream = DbToLin(sinrDb) / streams;
++    return streams * std::min(std::log2(1.0 + perStream), m_cfg.maxSpectralEfficiency);
++}
++
++uint32_t
++CmfSimulation::PrbsNeeded(double demandBps, double sinrDb) const
++{
++    const double se = SpectralEfficiency(sinrDb);
++    if (se <= 0.0)
++    {
++        return PRB_PER_CELL + 1; // not servable
++    }
++    const double perPrbBps = PRB_BANDWIDTH_HZ * se;
++    const double needed = std::ceil(demandBps / perPrbBps);
++    if (needed > PRB_PER_CELL)
++    {
++        return PRB_PER_CELL + 1;
++    }
++    return static_cast<uint32_t>(std::max(1.0, needed));
++}
++
++void
++CmfSimulation::UpdateRadio()
++{
++    // Everything below is expressed per PRB: RxPowerDbm() returns the per-PRB
++    // received power, so the noise has to be integrated over one PRB as well.
++    const double noiseDbm =
++        -174.0 + 10.0 * std::log10(PRB_BANDWIDTH_HZ) + m_cfg.noiseFigureDb;
++    const double noiseLin = DbToLin(noiseDbm);
++
++    for (uint32_t u = 0; u < m_ue.size(); ++u)
++    {
++        UserEquipment& ue = m_ue[u];
++
++        // Redraw the LOS state once the UE left the correlation area.
++        if (std::hypot(ue.pos.x - ue.losRefPos.x, ue.pos.y - ue.losRefPos.y) >
++            m_cfg.losCorrelationDistance)
++        {
++            for (uint32_t b = 0; b < N_BS; ++b)
++            {
++                const double d2d = std::hypot(ue.pos.x - m_bs[b].pos.x, ue.pos.y - m_bs[b].pos.y);
++                ue.los[b] = (m_uniform->GetValue() < UmaLosProbability(d2d)) ? 1 : 0;
++            }
++            ue.losRefPos = ue.pos;
++        }
++
++        const size_t base = static_cast<size_t>(u) * N_BS;
++        double totalLin = 0.0;
++        for (uint32_t b = 0; b < N_BS; ++b)
++        {
++            const double rx = RxPowerDbm(ue, b);
++            m_rxPowerDbm[base + b] = rx;
++            // Interference is weighted by the utilisation of the interfering
++            // cell: an empty cell transmits on very few PRBs.
++            totalLin += DbToLin(rx) * m_bs[b].loadPrevStep;
++        }
++
++        for (uint32_t b = 0; b < N_BS; ++b)
++        {
++            const double sLin = DbToLin(m_rxPowerDbm[base + b]);
++            // Remove the wanted cell's own contribution from the interference.
++            const double iLin = std::max(0.0, totalLin - sLin * m_bs[b].loadPrevStep);
++            const double sinrLin =
++                sLin / (iLin * DbToLin(m_cfg.interferenceMarginDb) + noiseLin);
++            m_sinrDb[base + b] = LinToDb(sinrLin);
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Mobility
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::UpdateMobility()
++{
++    const double dt = m_cfg.stepTime;
++    for (UserEquipment& ue : m_ue)
++    {
++        if (m_uniform->GetValue() < m_cfg.directionChangeProb)
++        {
++            ue.direction = m_uniform->GetValue(0.0, 2.0 * M_PI);
++        }
++
++        Vector next(ue.pos.x + ue.speed * dt * std::cos(ue.direction),
++                    ue.pos.y + ue.speed * dt * std::sin(ue.direction),
++                    ue.pos.z);
++
++        if (!InsidePolygon(m_boundary, next))
++        {
++            // Boundary reached: pick a new direction that leads back inside.
++            bool ok = false;
++            for (int attempt = 0; attempt < 16 && !ok; ++attempt)
++            {
++                ue.direction = m_uniform->GetValue(0.0, 2.0 * M_PI);
++                next = Vector(ue.pos.x + ue.speed * dt * std::cos(ue.direction),
++                              ue.pos.y + ue.speed * dt * std::sin(ue.direction),
++                              ue.pos.z);
++                ok = InsidePolygon(m_boundary, next);
++            }
++            if (!ok)
++            {
++                continue; // stay put this step
++            }
++        }
++        ue.pos = next;
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Connection handling
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::ReleaseExpiredConnections()
++{
++    const double now = Now();
++    for (UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs >= 0 && now >= ue.connectionEnd)
++        {
++            // Free the resources right away so that the connection attempts
++            // handled later in this same step can see them.
++            BaseStation& bs = m_bs[ue.servingBs];
++            bs.prbUsed -= std::min(bs.prbUsed, ue.prbAllocated);
++            ue.servingBs = -1;
++            ue.a3Target = -1;
++            ue.lowSinrSince = -1.0;
++            ue.prbNeeded = 0;
++            ue.prbAllocated = 0;
++            ue.nextAttempt = now + std::max(1.0, m_attemptRv->GetValue());
++        }
++    }
++}
++
++void
++CmfSimulation::DetectRadioLinkFailures()
++{
++    const double now = Now();
++    for (UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs < 0)
++        {
++            continue;
++        }
++        const size_t idx = static_cast<size_t>(ue.id) * N_BS + ue.servingBs;
++        const double sinr = m_sinrDb[idx];
++        const double rsrp = m_rxPowerDbm[idx];
++        ue.connSinrDb = sinr;
++
++        const bool bad = (sinr < m_cfg.rlfSinrThresholdDb) || (rsrp < m_cfg.rxSensitivityDbm);
++        if (!bad)
++        {
++            ue.lowSinrSince = -1.0;
++            continue;
++        }
++        if (ue.lowSinrSince < 0.0)
++        {
++            ue.lowSinrSince = now;
++            continue;
++        }
++        if (now - ue.lowSinrSince < m_cfg.rlfTimer)
++        {
++            continue;
++        }
++
++        // Radio link failure: the connection is dropped.
++        BaseStation& bs = m_bs[ue.servingBs];
++        bs.rlfWindow.push_back(now);
++        bs.rlfTotal++;
++        m_rlfs++;
++        if (now >= m_cfg.warmupTime)
++        {
++            m_rlfAfterWarmup++;
++        }
++        m_rlfFile << now << "," << bs.id << "," << ue.id << "," << sinr << "," << ue.pos.x << ","
++                  << ue.pos.y << "\n";
++
++        bs.prbUsed -= std::min(bs.prbUsed, ue.prbAllocated);
++        ue.servingBs = -1;
++        ue.a3Target = -1;
++        ue.lowSinrSince = -1.0;
++        ue.prbNeeded = 0;
++        ue.prbAllocated = 0;
++        ue.nextAttempt = now + std::max(1.0, m_attemptRv->GetValue());
++    }
++}
++
++void
++CmfSimulation::RecordHandover(UserEquipment& ue, int32_t fromBs, int32_t toBs)
++{
++    const double now = Now();
++    BaseStation& source = m_bs[fromBs];
++    BaseStation& target = m_bs[toBs];
++
++    // Handovers and ping-pongs are attributed to the source cell, whose
++    // hysteresis and TTT governed the decision: that is what the MRO xApp tunes.
++    source.hoWindow.push_back(now);
++    source.hoTotal++;
++    m_handovers++;
++    if (now >= m_cfg.warmupTime)
++    {
++        m_hoAfterWarmup++;
++    }
++    m_hoFile << now << "," << source.id << "," << target.id << "," << ue.id << "," << ue.connSinrDb
++             << "," << ue.pos.x << "," << ue.pos.y << "\n";
++
++    const bool pingPong =
++        (ue.previousBs == toBs) && ((now - ue.lastHoTime) <= m_cfg.pingPongPeriod);
++    if (pingPong)
++    {
++        source.ppWindow.push_back(now);
++        source.ppTotal++;
++        m_pingPongs++;
++        if (now >= m_cfg.warmupTime)
++        {
++            m_ppAfterWarmup++;
++        }
++        m_ppFile << now << "," << target.id << "," << ue.id << "," << ue.connSinrDb << ","
++                 << ue.pos.x << "," << ue.pos.y << "," << (now - ue.lastHoTime) << "\n";
++    }
++
++    // Move the resources from the source to the target cell.
++    source.prbUsed -= std::min(source.prbUsed, ue.prbAllocated);
++    target.prbUsed += ue.prbAllocated;
++
++    ue.previousBs = fromBs;
++    ue.lastHoTime = now;
++    ue.servingBs = toBs;
++    ue.a3Target = -1;
++    ue.lowSinrSince = -1.0;
++}
++
++void
++CmfSimulation::EvaluateHandovers()
++{
++    const double now = Now();
++    for (UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs < 0)
++        {
++            continue;
++        }
++        const size_t base = static_cast<size_t>(ue.id) * N_BS;
++        const BaseStation& serving = m_bs[ue.servingBs];
++        const double servingQuality = m_rxPowerDbm[base + ue.servingBs] + serving.cio;
++
++        // A3 entering condition, evaluated against the strongest neighbour.
++        int32_t best = -1;
++        double bestQuality = -1e9;
++        for (uint32_t b = 0; b < N_BS; ++b)
++        {
++            if (static_cast<int32_t>(b) == ue.servingBs)
++            {
++                continue;
++            }
++            const double q = m_rxPowerDbm[base + b] + m_bs[b].cio;
++            if (q > bestQuality)
++            {
++                bestQuality = q;
++                best = static_cast<int32_t>(b);
++            }
++        }
++        if (best < 0)
++        {
++            continue;
++        }
++
++        const bool a3 = bestQuality > servingQuality + serving.hysteresis;
++        if (!a3)
++        {
++            ue.a3Target = -1;
++            continue;
++        }
++        if (ue.a3Target != best)
++        {
++            // Restart the Time-To-Trigger for the new candidate.
++            ue.a3Target = best;
++            ue.a3Since = now;
++            continue;
++        }
++        if (now - ue.a3Since < serving.ttt)
++        {
++            continue;
++        }
++
++        // The target must have room for the connection, otherwise the handover
++        // is not executed and the UE keeps its current cell.
++        // The UE's PRBs sit on the source cell, so the target has to have the
++        // whole demand free.
++        const uint32_t needed = PrbsNeeded(ue.demandBps, m_sinrDb[base + best]);
++        if (needed > m_bs[best].FreePrbs())
++        {
++            ue.a3Since = now; // retry after another TTT
++            continue;
++        }
++
++        RecordHandover(ue, ue.servingBs, best);
++    }
++}
++
++void
++CmfSimulation::HandleConnectionAttempts()
++{
++    const double now = Now();
++    for (UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs >= 0 || now < ue.nextAttempt)
++        {
++            continue;
++        }
++
++        const size_t base = static_cast<size_t>(ue.id) * N_BS;
++
++        // Rank the cells by received power and try the strongest ones in turn.
++        std::vector<std::pair<double, uint32_t>> ranked;
++        ranked.reserve(N_BS);
++        for (uint32_t b = 0; b < N_BS; ++b)
++        {
++            ranked.emplace_back(m_rxPowerDbm[base + b] + m_bs[b].cio, b);
++        }
++        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& c) {
++            return a.first > c.first;
++        });
++
++        bool admitted = false;
++        const uint32_t candidates = std::min<uint32_t>(m_cfg.admissionCandidates, N_BS);
++        for (uint32_t k = 0; k < candidates && !admitted; ++k)
++        {
++            const uint32_t b = ranked[k].second;
++            if (m_rxPowerDbm[base + b] < m_cfg.rxSensitivityDbm)
++            {
++                continue;
++            }
++            const double sinr = m_sinrDb[base + b];
++            if (sinr < m_cfg.rlfSinrThresholdDb)
++            {
++                continue;
++            }
++            const uint32_t needed = PrbsNeeded(ue.demandBps, sinr);
++            if (needed > m_bs[b].FreePrbs())
++            {
++                continue;
++            }
++
++            ue.servingBs = static_cast<int32_t>(b);
++            ue.previousBs = -1;
++            ue.lastHoTime = -1e9;
++            ue.connSinrDb = sinr;
++            ue.prbNeeded = needed;
++            ue.prbAllocated = needed;
++            ue.lowSinrSince = -1.0;
++            ue.a3Target = -1;
++            ue.connectionEnd = now + std::max(1.0, m_durationRv->GetValue());
++            m_bs[b].prbUsed += needed;
++            admitted = true;
++        }
++
++        if (!admitted)
++        {
++            // Call blockade: no cell could take the connection.
++            m_callBlockades++;
++            if (now >= m_cfg.warmupTime)
++            {
++                m_cbAfterWarmup++;
++            }
++            m_cbFile << now << "," << ue.id << "," << ue.pos.x << "," << ue.pos.y << "\n";
++            ue.nextAttempt = now + std::max(1.0, m_attemptRv->GetValue());
++        }
++    }
++}
++
++void
++CmfSimulation::AllocateResources()
++{
++    // Recompute the PRB demand of every connected UE with the current SINR, then
++    // share each cell's 100 PRBs proportionally when the cell is oversubscribed.
++    std::vector<std::vector<uint32_t>> perCell(N_BS);
++    for (UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs < 0)
++        {
++            continue;
++        }
++        const size_t idx = static_cast<size_t>(ue.id) * N_BS + ue.servingBs;
++        ue.connSinrDb = m_sinrDb[idx];
++        ue.prbNeeded = PrbsNeeded(ue.demandBps, ue.connSinrDb);
++        perCell[ue.servingBs].push_back(ue.id);
++    }
++
++    for (uint32_t b = 0; b < N_BS; ++b)
++    {
++        uint32_t demand = 0;
++        for (uint32_t ueId : perCell[b])
++        {
++            demand += m_ue[ueId].prbNeeded;
++        }
++
++        if (demand <= PRB_PER_CELL)
++        {
++            for (uint32_t ueId : perCell[b])
++            {
++                UserEquipment& ue = m_ue[ueId];
++                ue.prbAllocated = ue.prbNeeded;
++                ue.satisfaction = 1.0;
++            }
++            m_bs[b].prbUsed = demand;
++        }
++        else
++        {
++            // Proportional fair down-scaling; the cell ends up fully loaded.
++            const double scale = static_cast<double>(PRB_PER_CELL) / demand;
++            uint32_t used = 0;
++            for (uint32_t ueId : perCell[b])
++            {
++                UserEquipment& ue = m_ue[ueId];
++                const uint32_t alloc =
++                    std::max(1u, static_cast<uint32_t>(std::floor(ue.prbNeeded * scale)));
++                ue.prbAllocated = alloc;
++                ue.satisfaction =
++                    std::min(1.0, static_cast<double>(alloc) / std::max(1u, ue.prbNeeded));
++                used += alloc;
++            }
++            m_bs[b].prbUsed = std::min<uint32_t>(used, PRB_PER_CELL);
++        }
++    }
++}
++
++void
++CmfSimulation::Step()
++{
++    UpdateMobility();
++    UpdateRadio();
++    ReleaseExpiredConnections();
++    DetectRadioLinkFailures();
++    EvaluateHandovers();
++    HandleConnectionAttempts();
++    AllocateResources();
++
++    for (BaseStation& bs : m_bs)
++    {
++        bs.loadPrevStep = bs.Load();
++    }
++
++    if (Now() + m_cfg.stepTime <= m_cfg.simTime + 1e-9)
++    {
++        Simulator::Schedule(Seconds(m_cfg.stepTime), &CmfSimulation::Step, this);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// xApps and the Conflict Mitigation Framework
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::RunXapps()
++{
++    const double now = Now();
++    std::vector<ControlDecision> pending;
++
++    for (BaseStation& bs : m_bs)
++    {
++        PruneWindow(bs.hoWindow, now);
++        PruneWindow(bs.ppWindow, now);
++        PruneWindow(bs.rlfWindow, now);
++
++        const double hoCount = static_cast<double>(bs.hoWindow.size());
++        const double ppRatio = (hoCount > 0.0) ? bs.ppWindow.size() / hoCount : 0.0;
++        const double rlfRatio = (hoCount > 0.0) ? bs.rlfWindow.size() / hoCount : 0.0;
++
++        // MRO xApp: hysteresis from the RLF ratio, TTT from the ping-pong ratio.
++        if (bs.ricOwned.count(RanParameter::Hysteresis) == 0)
++        {
++            const double h = RlfRatioToHysteresis(std::min(1.0, rlfRatio));
++            if (std::abs(h - bs.hysteresis) > 1e-9)
++            {
++                pending.push_back({"MRO", bs.id, RanParameter::Hysteresis, h, now,
++                                   m_cfg.controlTimespanMs});
++            }
++        }
++        if (bs.ricOwned.count(RanParameter::TimeToTrigger) == 0)
++        {
++            const double t = PingPongRatioToTtt(std::min(1.0, ppRatio));
++            if (std::abs(t - bs.ttt) > 1e-9)
++            {
++                pending.push_back({"MRO", bs.id, RanParameter::TimeToTrigger, t, now,
++                                   m_cfg.controlTimespanMs});
++            }
++        }
++
++        // MLB xApp: CIO from the current load.
++        if (bs.ricOwned.count(RanParameter::Cio) == 0)
++        {
++            const double c = LoadToCio(bs.Load());
++            if (std::abs(c - bs.cio) > 1e-9)
++            {
++                pending.push_back(
++                    {"MLB", bs.id, RanParameter::Cio, c, now, m_cfg.controlTimespanMs});
++            }
++        }
++    }
++
++    const std::vector<ControlDecision> accepted = DetectAndMitigate(std::move(pending));
++    for (const ControlDecision& d : accepted)
++    {
++        ApplyDecision(d);
++    }
++    m_lastRoundDecisions = accepted;
++
++    if (now + m_cfg.controlPeriod <= m_cfg.simTime + 1e-9)
++    {
++        Simulator::Schedule(Seconds(m_cfg.controlPeriod), &CmfSimulation::RunXapps, this);
++    }
++}
++
++std::vector<ControlDecision>
++CmfSimulation::DetectAndMitigate(std::vector<ControlDecision> pending)
++{
++    // Group the decisions of this control round per target cell.
++    std::map<uint32_t, std::vector<size_t>> byCell;
++    for (size_t i = 0; i < pending.size(); ++i)
++    {
++        byCell[pending[i].cellId].push_back(i);
++    }
++
++    std::vector<bool> dropped(pending.size(), false);
++
++    for (const auto& [cellId, idxs] : byCell)
++    {
++        for (size_t a = 0; a < idxs.size(); ++a)
++        {
++            for (size_t b = a + 1; b < idxs.size(); ++b)
++            {
++                const ControlDecision& da = pending[idxs[a]];
++                const ControlDecision& db = pending[idxs[b]];
++                if (da.source == db.source)
++                {
++                    continue;
++                }
++
++                // DCD: two xApps writing the same parameter of the same cell.
++                if (da.parameter == db.parameter)
++                {
++                    m_directConflicts++;
++                    ReportConflict("DCD", "direct", "", {da, db});
++                }
++                // ICD: two xApps writing different parameters of one group.
++                else if (!GroupOf(da.parameter).empty() &&
++                         GroupOf(da.parameter) == GroupOf(db.parameter))
++                {
++                    m_indirectConflicts++;
++                    ReportConflict("ICD", "indirect", GroupOf(da.parameter), {da, db});
++                }
++                else
++                {
++                    continue;
++                }
++
++                // Mitigation: the prioritised xApp keeps its decision.
++                if (m_cfg.cmMode == CmMode::PrioMro)
++                {
++                    if (da.source != "MRO")
++                    {
++                        dropped[idxs[a]] = true;
++                    }
++                    if (db.source != "MRO")
++                    {
++                        dropped[idxs[b]] = true;
++                    }
++                }
++                else if (m_cfg.cmMode == CmMode::PrioMlb)
++                {
++                    if (da.source != "MLB")
++                    {
++                        dropped[idxs[a]] = true;
++                    }
++                    if (db.source != "MLB")
++                    {
++                        dropped[idxs[b]] = true;
++                    }
++                }
++                // CmMode::None: detected for the record, nothing is mitigated.
++            }
++        }
++    }
++
++    std::vector<ControlDecision> accepted;
++    accepted.reserve(pending.size());
++    for (size_t i = 0; i < pending.size(); ++i)
++    {
++        if (dropped[i] && m_cfg.cmMode != CmMode::None)
++        {
++            m_droppedDecisions++;
++            continue;
++        }
++        accepted.push_back(pending[i]);
++    }
++    return accepted;
++}
++
++void
++CmfSimulation::ApplyDecision(const ControlDecision& d)
++{
++    BaseStation* bs = nullptr;
++    for (BaseStation& candidate : m_bs)
++    {
++        if (candidate.id == d.cellId)
++        {
++            bs = &candidate;
++            break;
++        }
++    }
++    if (bs == nullptr)
++    {
++        NS_LOG_WARN("Control decision for unknown cell " << d.cellId);
++        return;
++    }
++
++    switch (d.parameter)
++    {
++    case RanParameter::Cio:
++        bs->cio = d.value;
++        break;
++    case RanParameter::Hysteresis:
++        bs->hysteresis = d.value;
++        break;
++    case RanParameter::TimeToTrigger:
++        bs->ttt = d.value;
++        break;
++    }
++}
++
++void
++CmfSimulation::ReportConflict(const std::string& detector,
++                              const std::string& conflictType,
++                              const std::string& groupName,
++                              const std::vector<ControlDecision>& decisions)
++{
++    // Same shape as json_messages/{DCD,ICD}/*signal conflict.json.
++    std::ostringstream os;
++    os << "{\"source\":\"" << detector << "\",\"command\":\"Notify\",\"conflictType\":\""
++       << conflictType << "\",\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch) << "\"";
++    if (!groupName.empty())
++    {
++        os << ",\"groupName\":\"" << groupName << "\"";
++    }
++    os << ",\"decisions\":[";
++    for (size_t i = 0; i < decisions.size(); ++i)
++    {
++        os << (i ? "," : "") << "{\"content\":" << DecisionToJson(decisions[i], m_epoch) << "}";
++    }
++    os << "]}";
++    m_conflictFile << os.str() << "\n";
++}
++
++void
++CmfSimulation::ReportImplicitConflict(const std::string& kpiName,
++                                      const std::vector<ControlDecision>& decisions)
++{
++    // Same shape as json_messages/ImCD/ImCD 9 signal conflict.json.
++    std::ostringstream os;
++    os << "{\"source\":\"ImCD\",\"command\":\"Notify\",\"conflictType\":\"implicit\""
++       << ",\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch) << "\",\"degradKPI\":\"" << kpiName
++       << "\",\"degradOccurrences\":[{\"timestamp\":\"" << FormatTimestamp(Now(), m_epoch)
++       << "\",\"decisions\":[";
++    for (size_t i = 0; i < decisions.size(); ++i)
++    {
++        os << (i ? "," : "") << DecisionToJson(decisions[i], m_epoch);
++    }
++    os << "]}]}";
++    m_conflictFile << os.str() << "\n";
++}
++
++// ---------------------------------------------------------------------------
++// KPIs
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::CollectKpis()
++{
++    const double now = Now();
++
++    std::vector<double> loads;
++    loads.reserve(N_BS);
++    double availSum = 0.0;
++    for (const BaseStation& bs : m_bs)
++    {
++        loads.push_back(bs.Load());
++        availSum += bs.Availability();
++    }
++    const double meanAvail = availSum / N_BS;
++
++    double satisSum = 0.0;
++    uint32_t active = 0;
++    for (const UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs >= 0)
++        {
++            satisSum += ue.satisfaction;
++            active++;
++        }
++    }
++    const double meanSatis =
++        active > 0 ? satisSum / active : std::numeric_limits<double>::quiet_NaN();
++    const double lbRatio = JainFairness(loads);
++
++    auto writeValue = [](std::ofstream& f, double t, double v) {
++        f << t << ",";
++        if (std::isnan(v))
++        {
++            f << "nan\n";
++        }
++        else
++        {
++            f << v << "\n";
++        }
++    };
++    writeValue(m_availFile, now, meanAvail);
++    writeValue(m_satisFile, now, meanSatis);
++    writeValue(m_lbFile, now, lbRatio);
++
++    for (uint32_t b = 0; b < N_BS; ++b)
++    {
++        const BaseStation& bs = m_bs[b];
++        m_bsFiles[b] << now << "," << bs.id << "," << bs.Availability() << "," << bs.cio << ","
++                     << bs.hysteresis << "," << bs.ttt << "\n";
++    }
++
++    // ImCD: a drop of the monitored KPI right after a round in which more than
++    // one xApp acted on the same cell is reported as an implicit conflict.
++    if (!std::isnan(meanSatis) && !std::isnan(m_lastSatisfaction) &&
++        m_lastSatisfaction > 0.0 &&
++        (m_lastSatisfaction - meanSatis) / m_lastSatisfaction > m_cfg.imcdDegradationThreshold)
++    {
++        std::map<uint32_t, std::set<std::string>> sourcesPerCell;
++        for (const ControlDecision& d : m_lastRoundDecisions)
++        {
++            sourcesPerCell[d.cellId].insert(d.source);
++        }
++        std::vector<ControlDecision> culprits;
++        for (const ControlDecision& d : m_lastRoundDecisions)
++        {
++            if (sourcesPerCell[d.cellId].size() > 1)
++            {
++                culprits.push_back(d);
++            }
++        }
++        if (!culprits.empty())
++        {
++            m_implicitConflicts++;
++            ReportImplicitConflict("MeanUeSatisfaction", culprits);
++        }
++    }
++    m_lastSatisfaction = meanSatis;
++
++    if (now >= m_cfg.warmupTime)
++    {
++        m_availAcc += meanAvail;
++        m_availSamples++;
++        if (!std::isnan(meanSatis))
++        {
++            m_satisAcc += meanSatis;
++            m_satisSamples++;
++        }
++        if (!std::isnan(lbRatio))
++        {
++            m_lbAcc += lbRatio;
++            m_lbSamples++;
++        }
++    }
++
++    if (now + m_cfg.kpiPeriod <= m_cfg.simTime + 1e-9)
++    {
++        Simulator::Schedule(Seconds(m_cfg.kpiPeriod), &CmfSimulation::CollectKpis, this);
++    }
++}
++
++void
++CmfSimulation::WriteSummary()
++{
++    const char* modeName = m_cfg.cmMode == CmMode::None
++                               ? "no_CM"
++                               : (m_cfg.cmMode == CmMode::PrioMro ? "prio_MRO" : "prio_MLB");
++
++    std::ostringstream os;
++    os << "\n==================== NORI CMF summary ====================\n"
++       << "CM mode                     : " << modeName << "\n"
++       << "Simulated time              : " << m_cfg.simTime << " s (warm-up " << m_cfg.warmupTime
++       << " s discarded)\n"
++       << "Base stations / users       : " << N_BS << " / " << m_cfg.nUe << "\n"
++       << "----------------------------------------------------------\n"
++       << "Mean BS load                : "
++       << (m_availSamples ? 1.0 - m_availAcc / m_availSamples : 0.0) << "\n"
++       << "Mean user satisfaction      : "
++       << (m_satisSamples ? m_satisAcc / m_satisSamples : 0.0) << "\n"
++       << "Mean load-balancing (Jain)  : " << (m_lbSamples ? m_lbAcc / m_lbSamples : 0.0) << "\n"
++       << "----------------------------------------------------------\n"
++       << "Handovers                   : " << m_hoAfterWarmup << "\n"
++       << "Ping-pong handovers         : " << m_ppAfterWarmup << "\n"
++       << "Radio link failures         : " << m_rlfAfterWarmup << "\n"
++       << "Call blockades              : " << m_cbAfterWarmup << "\n"
++       << "----------------------------------------------------------\n"
++       << "Direct conflicts (DCD)      : " << m_directConflicts << "\n"
++       << "Indirect conflicts (ICD)    : " << m_indirectConflicts << "\n"
++       << "Implicit conflicts (ImCD)   : " << m_implicitConflicts << "\n"
++       << "Decisions dropped by the CMF: " << m_droppedDecisions << "\n"
++       << "==========================================================\n";
++
++    std::cout << os.str();
++    const std::string prefix = m_cfg.outputDir.empty() ? "" : m_cfg.outputDir + "/";
++    std::ofstream summary(prefix + "summary.txt");
++    if (summary.is_open())
++    {
++        summary << os.str();
++    }
++}
++
++// ---------------------------------------------------------------------------
++// E2 interface towards the Near-RT RIC
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::KpmSubscriptionCallback(uint32_t bsIdx, E2AP_PDU_t* pdu)
++{
++    NS_LOG_INFO("RIC Subscription Request received for cell " << m_bs[bsIdx].id);
++    m_bs[bsIdx].e2SubParams = m_bs[bsIdx].e2Term->ProcessRicSubscriptionRequest(pdu);
++    m_bs[bsIdx].e2Subscribed = true;
++    // The callback runs on the e2sim thread; hop back to the simulator thread.
++    Simulator::ScheduleWithContext(1, Seconds(0), &CmfSimulation::SendKpmIndication, this, bsIdx);
++}
++
++void
++CmfSimulation::SendKpmIndication(uint32_t bsIdx)
++{
++    BaseStation& bs = m_bs[bsIdx];
++    if (!bs.e2Subscribed || bs.e2Term == nullptr)
++    {
++        return;
++    }
++
++    const double now = Now();
++    PruneWindow(bs.hoWindow, now);
++    PruneWindow(bs.ppWindow, now);
++    PruneWindow(bs.rlfWindow, now);
++
++    uint32_t activeUes = 0;
++    double satisSum = 0.0;
++    for (const UserEquipment& ue : m_ue)
++    {
++        if (ue.servingBs == static_cast<int32_t>(bsIdx))
++        {
++            activeUes++;
++            satisSum += ue.satisfaction;
++        }
++    }
++
++    // --- Indication header ---
++    KpmIndicationHeader::KpmRicIndicationHeaderValues headerValues;
++    headerValues.m_plmId = PLMN_ID;
++    headerValues.m_gnbId = std::to_string(bs.id);
++    headerValues.m_nrCellId = bs.id;
++    headerValues.m_timestamp = static_cast<uint64_t>(Simulator::Now().GetMilliSeconds());
++    auto header =
++        Create<KpmIndicationHeader>(KpmIndicationHeader::GlobalE2nodeType::gNB, headerValues);
++
++    // --- O-DU measurement container ---
++    auto qciReport = Create<EpcDuPmContainer>();
++    qciReport->m_qci = 1;
++    qciReport->m_dlPrbUsage = static_cast<long>(bs.prbUsed); // 100 PRBs, so already a percentage
++    qciReport->m_ulPrbUsage = 0;
++
++    auto servedPlmn = Create<ServedPlmnPerCell>();
++    servedPlmn->m_plmId = PLMN_ID;
++    servedPlmn->m_nrCellId = bs.id;
++    servedPlmn->m_perQciReportItems.insert(qciReport);
++
++    auto cellReport = Create<CellResourceReport>();
++    cellReport->m_plmId = PLMN_ID;
++    cellReport->m_nrCellId = bs.id;
++    cellReport->dlAvailablePrbs = PRB_PER_CELL;
++    cellReport->ulAvailablePrbs = PRB_PER_CELL;
++    cellReport->m_servedPlmnPerCellItems.insert(servedPlmn);
++
++    auto duValues = Create<ODuContainerValues>();
++    duValues->m_cellResourceReportItems.insert(cellReport);
++
++    // --- Cell measurement items consumed by the MRO and MLB xApps ---
++    auto cellItems = Create<MeasurementItemList>();
++    cellItems->AddItem<long>("RRU.PrbUsedDl", static_cast<long>(bs.prbUsed));
++    cellItems->AddItem<long>("RRU.PrbAvailDl", static_cast<long>(PRB_PER_CELL));
++    cellItems->AddItem<long>("DRB.MeanActiveUeDl", static_cast<long>(activeUes));
++    cellItems->AddItem<long>("HO.TotNbrOut", static_cast<long>(bs.hoWindow.size()));
++    cellItems->AddItem<long>("HO.PingPongNbrOut", static_cast<long>(bs.ppWindow.size()));
++    cellItems->AddItem<long>("RRC.ReEstabAtt.RLF", static_cast<long>(bs.rlfWindow.size()));
++    // Current values of the contended parameters, in milli-units so that they
++    // survive the integer encoding of the KPM measurement values.
++    cellItems->AddItem<long>("MLB.CioMilliDb", std::lround(bs.cio * 1000.0));
++    cellItems->AddItem<long>("MRO.HysteresisMilliDb", std::lround(bs.hysteresis * 1000.0));
++    cellItems->AddItem<long>("MRO.TimeToTriggerMs", std::lround(bs.ttt * 1000.0));
++    cellItems->AddItem<long>("QoS.MeanUeSatisfactionPermille",
++                             activeUes ? std::lround(1000.0 * satisSum / activeUes) : 0L);
++
++    KpmIndicationMessage::KpmIndicationMessageValues msgValues;
++    msgValues.m_cellObjectId = "NRCellDU_" + std::to_string(bs.id);
++    msgValues.m_pmContainerValues = duValues;
++    msgValues.m_cellMeasurementItems = cellItems;
++    auto message = Create<KpmIndicationMessage>(msgValues);
++
++    auto* pdu = new E2AP_PDU;
++    encoding::generate_e2apv1_indication_request_parameterized(pdu,
++                                                              bs.e2SubParams.requestorId,
++                                                              bs.e2SubParams.instanceId,
++                                                              bs.e2SubParams.ranFuncionId,
++                                                              bs.e2SubParams.actionId,
++                                                              1,
++                                                              (uint8_t*)header->m_buffer,
++                                                              header->m_size,
++                                                              (uint8_t*)message->m_buffer,
++                                                              message->m_size);
++    bs.e2Term->SendE2Message(pdu);
++    delete pdu;
++
++    if (now + m_cfg.e2Periodicity <= m_cfg.simTime + 1e-9)
++    {
++        Simulator::ScheduleWithContext(1,
++                                       Seconds(m_cfg.e2Periodicity),
++                                       &CmfSimulation::SendKpmIndication,
++                                       this,
++                                       bsIdx);
++    }
++}
++
++void
++CmfSimulation::RicControlCallback(uint32_t bsIdx, E2AP_PDU_t* pdu)
++{
++    NS_LOG_INFO("RIC Control Request received for cell " << m_bs[bsIdx].id);
++
++    Ptr<RicControlMessage> msg = Create<RicControlMessage>(pdu);
++
++    // The E2SM-RC control message carries a flat list of RAN parameters
++    // (E2SM-RC-ControlMessage-Format1 / ranParameters-List). Each
++    // RANParameter-Item is self-contained: ranParameterItem-ID identifies the
++    // parameter, ranParameter-Value/valueInt carries its value in milli-units
++    // (milli-dB for CIO/hysteresis, milliseconds for TTT). The convention used
++    // here, and expected from the MRO/MLB xApps, is:
++    //   1 = HOMeasurementOffset (CIO), 2 = HOHysteresis, 3 = HOTimeToTrigger
++    const std::vector<RANParameterItem>& items = msg->m_valuesExtracted;
++    for (const RANParameterItem& item : items)
++    {
++        if (item.m_valueType != RANParameterItem::ValueType::Int)
++        {
++            NS_LOG_WARN("Ignoring a non-integer RAN parameter (id " << item.m_id << ")");
++            continue;
++        }
++
++        ControlDecision d;
++        d.cellId = m_bs[bsIdx].id;
++        d.timestamp = Simulator::Now().GetSeconds();
++        d.controlTimespanMs = m_cfg.controlTimespanMs;
++        d.value = item.m_valueInt / 1000.0;
++
++        switch (item.m_id)
++        {
++        case 1:
++            d.parameter = RanParameter::Cio;
++            d.source = "xApp-MLB";
++            break;
++        case 2:
++            d.parameter = RanParameter::Hysteresis;
++            d.source = "xApp-MRO";
++            break;
++        case 3:
++            d.parameter = RanParameter::TimeToTrigger;
++            d.source = "xApp-MRO";
++            break;
++        default:
++            NS_LOG_WARN("Unknown RAN parameter id " << item.m_id);
++            continue;
++        }
++
++        // Applied on the simulator thread, like every other state change.
++        Simulator::ScheduleWithContext(1,
++                                       Seconds(0),
++                                       &CmfSimulation::ApplyRicDecision,
++                                       this,
++                                       d);
++    }
++}
++
++void
++CmfSimulation::ApplyRicDecision(ControlDecision d)
++{
++    // A real xApp on the RIC now owns this parameter: the built-in emulation
++    // stops writing it so that the two control loops do not fight each other.
++    for (BaseStation& bs : m_bs)
++    {
++        if (bs.id == d.cellId)
++        {
++            bs.ricOwned.insert(d.parameter);
++            break;
++        }
++    }
++    const std::vector<ControlDecision> accepted = DetectAndMitigate({d});
++    for (const ControlDecision& a : accepted)
++    {
++        ApplyDecision(a);
++    }
++}
++
++// ---------------------------------------------------------------------------
++
++void
++CmfSimulation::Run()
++{
++    Simulator::Stop(Seconds(m_cfg.simTime));
++    Simulator::Run();
++    WriteSummary();
++    Simulator::Destroy();
++}
++
++} // namespace
++
++int
++main(int argc, char* argv[])
++{
++    CmfConfig cfg;
++    std::string cmModeStr = "none";
++
++    CommandLine cmd(__FILE__);
++    cmd.AddValue("simTime", "Total simulated time in seconds", cfg.simTime);
++    cmd.AddValue("stepTime", "UE position and measurement update period in seconds", cfg.stepTime);
++    cmd.AddValue("kpiPeriod", "KPI polling period in seconds", cfg.kpiPeriod);
++    cmd.AddValue("controlPeriod", "xApp decision period in seconds", cfg.controlPeriod);
++    cmd.AddValue("warmupTime", "Initial time discarded from the averages", cfg.warmupTime);
++    cmd.AddValue("cmMode", "Conflict mitigation mode: none, prioMRO or prioMLB", cmModeStr);
++    cmd.AddValue("nUe", "Number of user equipments", cfg.nUe);
++    cmd.AddValue("isd", "Inter-site distance in meters", cfg.isd);
++    cmd.AddValue("rxSensitivity", "UE receiver sensitivity in dBm", cfg.rxSensitivityDbm);
++    cmd.AddValue("rlfSinrThreshold", "SINR below which the link fails, in dB",
++                 cfg.rlfSinrThresholdDb);
++    cmd.AddValue("pingPongPeriod", "Ping-pong handover detection window in seconds",
++                 cfg.pingPongPeriod);
++    cmd.AddValue("mroWindow", "Statistics window of the MRO xApp in seconds", cfg.mroWindow);
++    cmd.AddValue("outputDir", "Directory receiving the CSV and JSON traces", cfg.outputDir);
++    cmd.AddValue("rngSeed", "RNG seed", cfg.rngSeed);
++    cmd.AddValue("rngRun", "RNG run number", cfg.rngRun);
++    cmd.AddValue("useE2", "Connect every cell to the Near-RT RIC over E2", cfg.useE2);
++    cmd.AddValue("ipE2TermRic", "IP address of the RIC E2 termination", cfg.ricIp);
++    cmd.AddValue("e2Periodicity", "KPM indication period in seconds", cfg.e2Periodicity);
++    cmd.Parse(argc, argv);
++
++    if (cmModeStr == "none")
++    {
++        cfg.cmMode = CmMode::None;
++    }
++    else if (cmModeStr == "prioMRO")
++    {
++        cfg.cmMode = CmMode::PrioMro;
++    }
++    else if (cmModeStr == "prioMLB")
++    {
++        cfg.cmMode = CmMode::PrioMlb;
++    }
++    else
++    {
++        NS_ABORT_MSG("Unknown cmMode '" << cmModeStr << "', use none, prioMRO or prioMLB");
++    }
++
++    if (cfg.warmupTime >= cfg.simTime)
++    {
++        NS_LOG_WARN("warmupTime (" << cfg.warmupTime << " s) covers the whole run, averaging over "
++                                   << "the full simulation instead");
++        std::cerr << "Warning: warmupTime >= simTime, averaging over the full simulation\n";
++        cfg.warmupTime = 0.0;
++    }
++
++    RngSeedManager::SetSeed(cfg.rngSeed);
++    RngSeedManager::SetRun(cfg.rngRun);
++
++    if (cfg.useE2)
++    {
++        // The E2 termination talks to a real RIC, so the simulation has to run
++        // in wall-clock time.
++        GlobalValue::Bind("SimulatorImplementationType",
++                          StringValue("ns3::RealtimeSimulatorImpl"));
++        LogComponentEnable("E2Termination", LOG_LEVEL_INFO);
++    }
++
++    CmfSimulation sim(cfg);
++    sim.Setup();
++    sim.Run();
++
++    return EXIT_SUCCESS;
++}
+diff --git a/model/asn1c-types.cc b/model/asn1c-types.cc
+index b03053a..e3d3eeb 100644
+--- a/model/asn1c-types.cc
++++ b/model/asn1c-types.cc
+@@ -874,8 +874,17 @@ RANParameterItem::RANParameterItem(RANParameter_Item_t* ranParameterItem)
+ 
+ RANParameterItem::~RANParameterItem()
+ {
+-    if (m_ranParameterItem != NULL)
+-        ASN_STRUCT_FREE(asn_DEF_RANParameter_Item, m_ranParameterItem);
++    // NOTE: RANParameterItem has no user-defined copy constructor, so the
++    // compiler-generated one copies m_ranParameterItem as a raw pointer.
++    // ExtractRANParametersFromRANParameter() builds a short-lived local
++    // instance and push_back()'s a copy of it into the returned vector; the
++    // local's destructor would then run immediately and free the very node
++    // the vector copy still points to, and freeing it again when the vector
++    // is destroyed double-frees the same memory. Freeing is therefore
++    // deliberately not done here: the pointed-to ASN.1 subtree is released
++    // together with the E2SM-RC-ControlMessage it was decoded from (same
++    // trade-off already made a few lines above in DecodeRicControlMessage(),
++    // which never frees e2SmControlMessage/e2smControlHeader either).
+ }
+ 
+ std::vector<RANParameterItem>
+@@ -896,6 +905,7 @@ RANParameterItem::ExtractRANParametersFromRANParameter(RANParameter_Item_t* ranP
+     }
+     case RANParameter_ValueType_PR_ranParameter_Element: {
+         RANParameterItem newItem = RANParameterItem(ranParameterItem);
++        newItem.m_id = static_cast<long>(ranParameterItem->ranParameterItem_ID);
+         NS_LOG_DEBUG("[E2SM] RANParameter_ValueType_PR_ranParameter_Element");
+         RANParameter_ELEMENT_t* ranParameterElement =
+             ranParameterItem->ranParameterItem_valueType->choice.ranParameter_Element;
+diff --git a/model/asn1c-types.h b/model/asn1c-types.h
+index c7d7d8d..ce63e2d 100644
+--- a/model/asn1c-types.h
++++ b/model/asn1c-types.h
+@@ -346,6 +346,7 @@ class RANParameterItem : public SimpleRefCount<RANParameterItem>
+     RANParameter_Item_t* GetPointer();
+     RANParameter_Item_t GetValue();
+ 
++    long m_id{0}; //!< ranParameterItem-ID, copied out at extraction time (see .cc for why)
+     ValueType m_valueType;
+     long m_valueInt;
+     Ptr<OctetString> m_valueStr;
+diff --git a/model/ric-control-message.cc b/model/ric-control-message.cc
+index 7f75dbc..46bccf2 100644
+--- a/model/ric-control-message.cc
++++ b/model/ric-control-message.cc
+@@ -116,9 +116,13 @@ RicControlMessage::DecodeRicControlMessage(E2AP_PDU_t* pdu)
+             {
+                 m_e2SmRcControlHeaderFormat1 = e2smControlHeader->choice.controlHeader_Format1;
+ 
++                // rrmPolicyList is OPTIONAL per the E2SM-KPM-RC ASN.1 module: a
++                // control header that does not target RAN slicing (e.g. an
++                // MRO/MLB xApp writing handover-boundary parameters) legitimately
++                // omits it, so it must not be dereferenced unconditionally.
+                 auto *prList = m_e2SmRcControlHeaderFormat1->rrmPolicyList;
+ 
+-                for (size_t i = 0; i < prList->list.count; ++i)
++                for (size_t i = 0; prList != nullptr && i < prList->list.count; ++i)
+                 {
+                     auto *grp = prList->list.array[i];
+ 
+@@ -263,23 +267,24 @@ std::vector<RANParameterItem>
+ RicControlMessage::ExtractRANParametersFromControlMessage(
+     E2SM_RC_ControlMessage_Format1_t* e2SmRcControlMessageFormat1)
+ {
+-    // Returning an empty vector for now
+     std::vector<RANParameterItem> ranParameterList;
+-    /**
+-     *
+-     int count = e2SmRcControlMessageFormat1->ranParameters_List->list.count;
+-     std::cout << "flag" << std::endl;
+-     for (int i = 0; i < count; i++)
+-     {
++    if (e2SmRcControlMessageFormat1->ranParameters_List == nullptr)
++    {
++        NS_LOG_DEBUG("[E2SM] Control message has no ranParameters-List");
++        return ranParameterList;
++    }
++
++    int count = e2SmRcControlMessageFormat1->ranParameters_List->list.count;
++    for (int i = 0; i < count; i++)
++    {
+         RANParameter_Item_t* ranParameterItem =
+-        e2SmRcControlMessageFormat1->ranParameters_List->list.array[i];
++            e2SmRcControlMessageFormat1->ranParameters_List->list.array[i];
+         for (RANParameterItem extractedParameter :
+-        RANParameterItem::ExtractRANParametersFromRANParameter(ranParameterItem))
++             RANParameterItem::ExtractRANParametersFromRANParameter(ranParameterItem))
+         {
+             ranParameterList.push_back(extractedParameter);
+         }
+     }
+-    */
+     return ranParameterList;
+ }
+ 
