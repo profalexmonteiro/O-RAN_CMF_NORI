@@ -97,6 +97,10 @@ O-RAN_CMF_NORI/
 
 Cada diretório carrega **duas formas equivalentes** do mesmo conteúdo: a árvore de arquivos já pronta (para quem só quer copiar e usar) e um `.patch` (para quem prefere aplicar as mudanças sobre um clone limpo do projeto-base — a forma recomendada, porque preserva o histórico git de cada projeto). Este guia usa os `.patch`. Os três patches de xApp (`xapp-MRO.patch`, `xapp-MLB.patch`, `xapp-CMF.patch`) aplicam com `patch -p1`, o que funciona tanto com `git apply` quanto com o `patch` do GNU coreutils.
 
+> **Nota sobre os links dentro de cada `README.md`/`nori-cmf.md`.** Esses arquivos são publicados aqui como uma cópia fiel do que fica em cada destino final depois do patch aplicado (`~/xapp-MRO`, `~/xapp-MLB`, `~/xapp-CMF`, `~/ns-3-dev/contrib/nori/docs`) — por isso, links relativos como `../ns-3-dev/...` ou `../../../xapp-CMF` são escritos para funcionar **depois** de aplicados, a partir do `$HOME` da VM, e não necessariamente ao navegar direto pelas pastas deste repositório. Siga o passo a passo abaixo antes de clicar nos links internos de cada README.
+
+
+
 ## Pré-requisitos
 
 - Uma VM do [OpenRAN@Brasil Blueprint v1](https://github.com/LABORA-INF-UFG/openran-br-blueprint/wiki/OpenRAN@Brasil-Blueprint-v1), com `git`, `kubectl`, `docker` e `dms_cli` disponíveis;

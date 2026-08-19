@@ -1,4 +1,4 @@
-# `nori-cmf.cc` — Conflict Mitigation Framework para O-RAN
+# `nori-cmf.cc` — Cenário de RAN e E2 para o Conflict Mitigation Framework do O-RAN
 
 ## Sumário
 
@@ -24,14 +24,15 @@
 
 ## 1. Visão geral
 
-[`nori-cmf.cc`](../examples/nori-cmf.cc) é um exemplo do módulo **NORI** para o ns-3 que reproduz, em nível de sistema, o cenário descrito no artigo *"Conflict Mitigation Framework and Conflict Detection in O-RAN nRT-RIC"* (IEEE ComMag, 2023). O exemplo simula:
+[`nori-cmf.cc`](../examples/nori-cmf.cc) é um exemplo do módulo **NORI** para o ns-3 que reproduz, em nível de sistema, o cenário de rede descrito no artigo *"Conflict Mitigation Framework and Conflict Detection in O-RAN nRT-RIC"* (IEEE ComMag, 2023) — o mesmo cenário sobre o qual o [`xApp-CMF`](../../../xapp-CMF) exercita o Conflict Mitigation Framework (CMF) propriamente dito. O exemplo simula:
 
 - uma rede de **19 estações-base** em grade hexagonal, com **380 usuários** móveis;
-- **dois xApps** que competem pela fronteira de handover de cada célula — **MRO** (Mobility Robustness Optimization) e **MLB** (Mobility Load Balancing);
-- um **Conflict Mitigation Framework (CMF)** que detecta e, opcionalmente, resolve os conflitos entre as decisões desses xApps;
+- **dois xApps** que competem pela fronteira de handover de cada célula — **MRO** (Mobility Robustness Optimization) e **MLB** (Mobility Load Balancing) — emulados internamente para testes offline, ou controlados por xApps reais via E2;
 - uma **interface E2 real** por célula, capaz de reportar KPMs e receber comandos RIC Control de um Near-RT RIC de verdade, com um modo totalmente offline para reprodutibilidade.
 
-O objetivo didático deste documento é permitir que qualquer pessoa leia o `.cc` (~2000 linhas) entendendo *por que* cada bloco existe, não apenas *o que* ele faz.
+**Este arquivo não detecta nem mitiga conflitos.** Ele só aplica, sem arbitrar, qualquer decisão de controle que receber — a detecção e a mitigação são responsabilidade do [`xApp-CMF`](../../../xapp-CMF) ([seção 10](#10-o-conflict-mitigation-framework-cmf)), que roda separadamente no Near-RT RIC.
+
+O objetivo didático deste documento é permitir que qualquer pessoa leia o `.cc` (~1700 linhas) entendendo *por que* cada bloco existe, não apenas *o que* ele faz.
 
 ---
 
@@ -73,7 +74,7 @@ O CMF pode operar em três modos, correspondentes aos três conjuntos de resulta
 
 `nori-cmf.cc` **não** usa a pilha completa de PHY/MAC do NR (5G-LENA). Essa é uma decisão de projeto deliberada: o cenário do artigo tem 19 células, 380 UEs e 1000 s de simulação — inviável em tempo de execução razoável com PHY/MAC completos, já que o número de UEs e a duração são ordens de grandeza maiores que os exemplos padrão do módulo NR. Em vez disso, o exemplo é uma **simulação de nível de sistema (system-level)**: usa o *scheduler* de eventos, o RNG e o modelo de mobilidade do ns-3, mas substitui PHY/MAC por um modelo analítico de rádio (pathloss 3GPP TR 38.901) e por uma contabilidade explícita de PRBs por célula.
 
-O núcleo é a classe `CmfSimulation` (linha ~535), que concentra todo o estado da simulação:
+O núcleo é a classe `CmfSimulation` (linha ~453), que concentra todo o estado da simulação:
 
 ```cpp
 class CmfSimulation
@@ -115,7 +116,7 @@ Essa separação em três períodos independentes é intencional e reflete a arq
 
 ### 5.1 Topologia das estações-base
 
-`BuildBaseStations()` (linha ~686) constrói uma grade hexagonal de 19 células, organizadas em cinco fileiras de 3-4-5-4-3 estações, reproduzindo a figura `figures/base_stations.png` do repositório de referência:
+`BuildBaseStations()` (linha ~579) constrói uma grade hexagonal de 19 células, organizadas em cinco fileiras de 3-4-5-4-3 estações, reproduzindo a figura `figures/base_stations.png` do repositório de referência:
 
 ```cpp
 static const int kRowSize[5] = {3, 4, 5, 4, 3};
@@ -125,11 +126,11 @@ Cada fileira é espaçada verticalmente por uma distância entre sites (`isd`, 1
 
 ### 5.2 Área de cobertura
 
-`BuildBoundary()` (linha ~719) define um hexágono que aproxima a borda de cobertura da rede, também reproduzindo a figura de referência. Esse polígono é usado tanto para distribuir os usuários iniciais quanto para o modelo de mobilidade "quicar na borda".
+`BuildBoundary()` (linha ~612) define um hexágono que aproxima a borda de cobertura da rede, também reproduzindo a figura de referência. Esse polígono é usado tanto para distribuir os usuários iniciais quanto para o modelo de mobilidade "quicar na borda".
 
 ### 5.3 Distribuição dos usuários
 
-`BuildUsers()` (linha ~738) gera 380 UEs por *rejection sampling* dentro do polígono de cobertura (sorteia um ponto no retângulo delimitador e descarta se cair fora do hexágono). Cada UE recebe:
+`BuildUsers()` (linha ~631) gera 380 UEs por *rejection sampling* dentro do polígono de cobertura (sorteia um ponto no retângulo delimitador e descarta se cair fora do hexágono). Cada UE recebe:
 
 - uma direção de movimento aleatória e uma velocidade (pedestre ou veicular, [seção 7](#7-mobilidade-e-tráfego));
 - um perfil de tráfego, que define a taxa de bits demandada;
@@ -143,7 +144,7 @@ O modelo de propagação implementa o **UMa (Urban Macro)** do 3GPP TR 38.901, e
 
 ### 6.1 Probabilidade de linha de visada
 
-`UmaLosProbability()` (linha ~232) implementa a Tabela 7.4.2-1 do TR 38.901 para altura de UE abaixo de 13 m:
+`UmaLosProbability()` (linha ~211) implementa a Tabela 7.4.2-1 do TR 38.901 para altura de UE abaixo de 13 m:
 
 ```cpp
 double UmaLosProbability(double d2d)
@@ -157,11 +158,11 @@ Cada UE tem seu estado LOS/NLOS por célula redesenhado sempre que se move mais 
 
 ### 6.2 Perda de percurso (pathloss)
 
-`UmaPathloss()` (linha ~243) implementa a Tabela 7.4.1-1 do TR 38.901, com a distância de breakpoint (`dBp`) calculada a partir das alturas efetivas de antena e da frequência portadora, e a fórmula NLOS tomando o máximo entre a perda LOS e a fórmula NLOS específica (como manda a norma).
+`UmaPathloss()` (linha ~222) implementa a Tabela 7.4.1-1 do TR 38.901, com a distância de breakpoint (`dBp`) calculada a partir das alturas efetivas de antena e da frequência portadora, e a fórmula NLOS tomando o máximo entre a perda LOS e a fórmula NLOS específica (como manda a norma).
 
 ### 6.3 Potência recebida e margens
 
-`RxPowerDbm()` (linha ~899) soma ao pathloss todas as margens listadas no README de referência — perda corporal, margem de *slow fading*, perda por folhagem e margem de chuva — além dos ganhos/perdas de antena e cabo de BS e UE:
+`RxPowerDbm()` (linha ~789) soma ao pathloss todas as margens listadas no README de referência — perda corporal, margem de *slow fading*, perda por folhagem e margem de chuva — além dos ganhos/perdas de antena e cabo de BS e UE:
 
 ```cpp
 return m_cfg.bsTxPowerDbm + m_cfg.bsAntennaGainDb - m_cfg.bsCableLossDb +
@@ -173,15 +174,15 @@ Esse valor é expresso **por PRB** (ver nota de calibração na [seção 15](#15
 
 ### 6.4 SINR e interferência
 
-`UpdateRadio()` (linha ~939) calcula, para cada par (UE, célula), a SINR incluindo interferência de todas as outras 18 células. A interferência de cada célula vizinha é **ponderada pela carga da célula no passo anterior** (`bs.loadPrevStep`): uma célula ociosa transmite em poucos PRBs e, portanto, interfere pouco; uma célula lotada transmite em todos os 100 PRBs e interfere ao máximo. Essa é uma aproximação de reuso de frequência total ponderado por carga, sem exigir alocação explícita de PRB por PRB entre células.
+`UpdateRadio()` (linha ~829) calcula, para cada par (UE, célula), a SINR incluindo interferência de todas as outras 18 células. A interferência de cada célula vizinha é **ponderada pela carga da célula no passo anterior** (`bs.loadPrevStep`): uma célula ociosa transmite em poucos PRBs e, portanto, interfere pouco; uma célula lotada transmite em todos os 100 PRBs e interfere ao máximo. Essa é uma aproximação de reuso de frequência total ponderado por carga, sem exigir alocação explícita de PRB por PRB entre células.
 
 O ruído térmico é calculado com a fórmula padrão `-174 dBm/Hz + 10·log10(largura de banda) + figura de ruído`, integrado sobre a largura de um único PRB (180 kHz: 12 subportadoras × 15 kHz), de forma consistente com a potência recebida por PRB.
 
 ### 6.5 Eficiência espectral e MIMO
 
-`SpectralEfficiency()` (linha ~914) aplica a fórmula de Shannon truncada no teto de eficiência espectral do CQI 15 da tabela 3GPP (5,5547 bits/s/Hz), com suporte a MIMO 2×2: acima de um limiar de SINR configurável (6 dB por padrão), a simulação assume que os dois fluxos espaciais (streams) são usados, dobrando a capacidade; abaixo do limiar, apenas um stream é usado — reflete o comportamento real de seleção de rank em MIMO.
+`SpectralEfficiency()` (linha ~804) aplica a fórmula de Shannon truncada no teto de eficiência espectral do CQI 15 da tabela 3GPP (5,5547 bits/s/Hz), com suporte a MIMO 2×2: acima de um limiar de SINR configurável (6 dB por padrão), a simulação assume que os dois fluxos espaciais (streams) são usados, dobrando a capacidade; abaixo do limiar, apenas um stream é usado — reflete o comportamento real de seleção de rank em MIMO.
 
-`PrbsNeeded()` (linha ~921) converte uma demanda em bps e uma SINR em número de PRBs necessários, arredondando para cima e sinalizando "não atendível" (`PRB_PER_CELL + 1`) quando a demanda excede a capacidade de uma célula inteira.
+`PrbsNeeded()` (linha ~812) converte uma demanda em bps e uma SINR em número de PRBs necessários, arredondando para cima e sinalizando "não atendível" (`PRB_PER_CELL + 1`) quando a demanda excede a capacidade de uma célula inteira.
 
 ---
 
@@ -189,7 +190,7 @@ O ruído térmico é calculado com a fórmula padrão `-174 dBm/Hz + 10·log10(l
 
 ### 7.1 Modelo de mobilidade
 
-`UpdateMobility()` (linha ~991) implementa um *random directional model* simples, fiel ao README de referência:
+`UpdateMobility()` (linha ~881) implementa um *random directional model* simples, fiel ao README de referência:
 
 - 80% dos usuários são pedestres (5 m/s), 20% são veiculares (25 m/s);
 - a cada passo de 0,05 s, a direção muda aleatoriamente com probabilidade de 0,06%;
@@ -215,7 +216,7 @@ O processo de tráfego segue um processo de Poisson aproximado por normais trunc
 
 ### 8.1 Ciclo de vida de uma conexão
 
-O laço `Step()` (linha ~1346) processa, nesta ordem, cada passo de 0,05 s:
+O laço `Step()` (linha ~1236) processa, nesta ordem, cada passo de 0,05 s:
 
 ```cpp
 void CmfSimulation::Step()
@@ -235,7 +236,7 @@ A ordem importa: os PRBs são liberados (`ReleaseExpiredConnections`, `DetectRad
 
 ### 8.2 Evento A3 (handover)
 
-`EvaluateHandovers()` (linha ~1151) implementa o evento **A3** do 3GPP (a base do algoritmo de handover em LTE/NR): um handover é disparado quando a qualidade de uma célula vizinha supera a qualidade da célula servidora por mais que a histerese configurada, **durante** um intervalo de Time-To-Trigger (TTT) contínuo.
+`EvaluateHandovers()` (linha ~1041) implementa o evento **A3** do 3GPP (a base do algoritmo de handover em LTE/NR): um handover é disparado quando a qualidade de uma célula vizinha supera a qualidade da célula servidora por mais que a histerese configurada, **durante** um intervalo de Time-To-Trigger (TTT) contínuo.
 
 ```cpp
 const double servingQuality = m_rxPowerDbm[base + ue.servingBs] + serving.cio;
@@ -247,11 +248,11 @@ const bool a3 = bestQuality > servingQuality + serving.hysteresis;
 
 Note que o **CIO** (Cell Individual Offset) entra somado à potência recebida de cada célula — é exatamente esse deslocamento que o MLB manipula para "atrair" ou "repelir" handovers de/para uma célula, sem alterar a potência de transmissão real.
 
-O estado `ue.a3Target`/`ue.a3Since` implementa o temporizador do TTT: quando uma nova candidata passa a satisfazer a condição de entrada, o temporizador reinicia; só quando a mesma candidata permanece melhor por `serving.ttt` segundos contínuos é que o handover é de fato executado — e mesmo assim, apenas se a célula-alvo tiver PRBs livres suficientes (`RecordHandover()`, linha ~1106).
+O estado `ue.a3Target`/`ue.a3Since` implementa o temporizador do TTT: quando uma nova candidata passa a satisfazer a condição de entrada, o temporizador reinicia; só quando a mesma candidata permanece melhor por `serving.ttt` segundos contínuos é que o handover é de fato executado — e mesmo assim, apenas se a célula-alvo tiver PRBs livres suficientes (`RecordHandover()`, linha ~996).
 
 ### 8.3 Falha de enlace de rádio (RLF)
 
-`DetectRadioLinkFailures()` (linha ~1053) modela uma falha de enlace como um "temporizador Qout": quando a SINR cai abaixo de `rlfSinrThresholdDb` (ou a potência recebida abaixo da sensibilidade do receptor) por mais que `rlfTimer` segundos contínuos, a conexão é derrubada e os PRBs são liberados.
+`DetectRadioLinkFailures()` (linha ~943) modela uma falha de enlace como um "temporizador Qout": quando a SINR cai abaixo de `rlfSinrThresholdDb` (ou a potência recebida abaixo da sensibilidade do receptor) por mais que `rlfTimer` segundos contínuos, a conexão é derrubada e os PRBs são liberados.
 
 ### 8.4 Ping-pong
 
@@ -259,17 +260,17 @@ Um handover é classificado como *ping-pong* em `RecordHandover()` quando o UE r
 
 ### 8.5 Admissão de novas conexões
 
-`HandleConnectionAttempts()` (linha ~1219) ordena as 19 células por potência recebida (já incluindo o CIO — o MLB também influencia *onde* uma conexão nova é aceita, não só os handovers) e tenta admitir o UE nas três candidatas mais fortes, na ordem. Se nenhuma tiver PRBs livres suficientes, ou a SINR/potência estiver abaixo dos limiares mínimos, a tentativa é registrada como **bloqueio de chamada** (*call blockade*).
+`HandleConnectionAttempts()` (linha ~1109) ordena as 19 células por potência recebida (já incluindo o CIO — o MLB também influencia *onde* uma conexão nova é aceita, não só os handovers) e tenta admitir o UE nas três candidatas mais fortes, na ordem. Se nenhuma tiver PRBs livres suficientes, ou a SINR/potência estiver abaixo dos limiares mínimos, a tentativa é registrada como **bloqueio de chamada** (*call blockade*).
 
 ### 8.6 Alocação de PRBs
 
-`AllocateResources()` (linha ~1290) recalcula a demanda de PRB de cada UE conectado com a SINR corrente e, quando a soma das demandas de uma célula excede seus 100 PRBs, faz um *downscaling* proporcional (fair-share) entre todos os UEs daquela célula — o que define a satisfação individual de cada UE (razão entre PRBs alocados e PRBs necessários, limitada a 1,0).
+`AllocateResources()` (linha ~1180) recalcula a demanda de PRB de cada UE conectado com a SINR corrente e, quando a soma das demandas de uma célula excede seus 100 PRBs, faz um *downscaling* proporcional (fair-share) entre todos os UEs daquela célula — o que define a satisfação individual de cada UE (razão entre PRBs alocados e PRBs necessários, limitada a 1,0).
 
 ---
 
 ## 9. Os xApps MRO e MLB
 
-`RunXapps()` (linha ~1372) roda a cada `controlPeriod` (1 s por padrão) e implementa a lógica de **dois** xApps, cada um monitorando uma janela deslizante de eventos por célula (`mroWindow`, 240 s):
+`RunXapps()` (linha ~1262) roda a cada `controlPeriod` (1 s por padrão) e implementa a lógica de **dois** xApps, cada um monitorando uma janela deslizante de eventos por célula (`mroWindow`, 240 s):
 
 ```cpp
 PruneWindow(bs.hoWindow, now);
@@ -284,12 +285,12 @@ const double rlfRatio = bs.rlfWindow.size() / hoCount;
 
 O MRO escreve **dois** parâmetros por célula, cada um a partir de uma tabela de degraus do artigo de referência:
 
-- **Time-To-Trigger**, a partir da razão de ping-pong (`PingPongRatioToTtt()`, linha ~293): quanto mais handovers desnecessários (ping-pongs), maior o TTT — a célula passa a exigir uma vantagem sustentada por mais tempo antes de aceitar um handover, reduzindo indecisão.
-- **Histerese**, a partir da razão de RLF (`RlfRatioToHysteresis()`, linha ~317): quanto mais falhas de enlace, maior a histerese — a intenção é o oposto: um handover mais **fácil** de disparar (menos margem exigida) reduz o tempo em más condições de rádio. *(A relação exata segue a tabela publicada; ver a nota de calibração na seção 15 sobre os degraus extras adicionados nas extremidades das tabelas.)*
+- **Time-To-Trigger**, a partir da razão de ping-pong (`PingPongRatioToTtt()`, linha ~273): quanto mais handovers desnecessários (ping-pongs), maior o TTT — a célula passa a exigir uma vantagem sustentada por mais tempo antes de aceitar um handover, reduzindo indecisão.
+- **Histerese**, a partir da razão de RLF (`RlfRatioToHysteresis()`, linha ~297): quanto mais falhas de enlace, maior a histerese — a intenção é o oposto: um handover mais **fácil** de disparar (menos margem exigida) reduz o tempo em más condições de rádio. *(A relação exata segue a tabela publicada; ver a nota de calibração na seção 15 sobre os degraus extras adicionados nas extremidades das tabelas.)*
 
 ### 9.2 MLB — Mobility Load Balancing
 
-O MLB escreve um único parâmetro: o **CIO**, a partir da carga atual da célula (`LoadToCio()`, linha ~326). Células mais carregadas recebem um CIO maior, o que — combinado à fórmula do evento A3 ([seção 8.2](#82-evento-a3-handover)) — torna a célula menos atraente para handovers de entrada e admissões novas, empurrando tráfego para vizinhas menos carregadas.
+O MLB escreve um único parâmetro: o **CIO**, a partir da carga atual da célula (`LoadToCio()`, linha ~306). Células mais carregadas recebem um CIO maior, o que — combinado à fórmula do evento A3 ([seção 8.2](#82-evento-a3-handover)) — torna a célula menos atraente para handovers de entrada e admissões novas, empurrando tráfego para vizinhas menos carregadas.
 
 ### 9.3 Por que MRO e MLB colidem
 
@@ -310,7 +311,7 @@ Um aumento de CIO decidido pelo MLB para aliviar uma célula lotada pode ser par
 >
 > O CMF (CD Agent, CR Agent, PMon) agora é um xApp separado, [`xapp-CMF`](../../../xapp-CMF), rodando no Near-RT RIC — exatamente onde o artigo de referência ([Adamczyk & Kliks, IEEE ComMag 2023](https://arxiv.org/abs/2305.07117)) o posiciona (Fig. 2 do artigo: o CM é uma entidade do Near-RT RIC, não do simulador de RAN). Os xApps MRO e MLB submetem cada decisão ao `xapp-CMF` (`POST /ric/v1/cmf/evaluate`) *antes* de enviar um RIC Control Request; se rejeitada, a decisão simplesmente não é enviada.
 >
-> Para a implementação de DCD, ICD, ICD e do CR Agent, veja [`xapp-CMF/README.md`](../../../xapp-CMF/README.md) e os módulos `src/cd_agent.py`, `src/cr_agent.py`, `src/pmon.py` daquele xApp. A [seção 15.3](#153-validação-numérica) abaixo preserva a validação numérica feita quando o CMF ainda era embutido — os números continuam válidos como evidência de que o modelo de rádio/mobilidade e as tabelas de decisão de MRO/MLB estão corretos, só não refletem mais o caminho de mitigação (que agora é testado a partir do `xapp-CMF`).
+> Para a implementação de DCD, ICD, ImCD e do CR Agent, veja [`xapp-CMF/README.md`](../../../xapp-CMF/README.md) e os módulos `src/cd_agent.py`, `src/cr_agent.py`, `src/pmon.py` daquele xApp. A [seção 15.3](#153-validação-numérica) abaixo preserva a validação numérica feita quando o CMF ainda era embutido — os números continuam válidos como evidência de que o modelo de rádio/mobilidade e as tabelas de decisão de MRO/MLB estão corretos, só não refletem mais o caminho de mitigação (que agora é testado a partir do `xapp-CMF`).
 
 ---
 
@@ -318,7 +319,7 @@ Um aumento de CIO decidido pelo MLB para aliviar uma célula lotada pode ser par
 
 ### 11.1 Uma célula, um nó E2
 
-`SetupE2Terminations()` (linha ~844) cria uma instância de `E2Termination` **por célula** (19 no total), cada uma conectando de forma independente ao endereço do RIC (`--ipE2TermRic`), registrando dois modelos de serviço:
+`SetupE2Terminations()` (linha ~734) cria uma instância de `E2Termination` **por célula** (19 no total), cada uma conectando de forma independente ao endereço do RIC (`--ipE2TermRic`), registrando dois modelos de serviço:
 
 - **KPM** (RAN Function ID 200): reporta indicações periódicas de KPI;
 - **RIC Control** (RAN Function ID 300): recebe comandos de controle de xApps reais no RIC.
@@ -332,7 +333,7 @@ Esse desenho segue o mesmo padrão dos demais exemplos do módulo NORI (`nori-sa
 
 ### 11.2 Indicações KPM
 
-Quando o RIC confirma uma assinatura (`KpmSubscriptionCallback()`, linha ~1739), a célula passa a enviar indicações periódicas (`SendKpmIndication()`, linha ~1749) contendo:
+Quando o RIC confirma uma assinatura (`KpmSubscriptionCallback()`, linha ~1460), a célula passa a enviar indicações periódicas (`SendKpmIndication()`, linha ~1470) contendo:
 
 - o contêiner O-DU padrão do E2SM-KPM (PRBs disponíveis/usados, QCI);
 - uma lista de métricas customizadas consumidas pelos xApps MRO/MLB: `HO.TotNbrOut`, `HO.PingPongNbrOut`, `RRC.ReEstabAtt.RLF`, `RRU.PrbUsedDl`, `DRB.MeanActiveUeDl`;
@@ -340,7 +341,7 @@ Quando o RIC confirma uma assinatura (`KpmSubscriptionCallback()`, linha ~1739),
 
 ### 11.3 Comandos RIC Control
 
-`RicControlCallback()` (linha ~1850) decodifica uma mensagem E2SM-RC Control recebida do RIC. A convenção usada (documentada no próprio código) é uma lista de pares `[id do parâmetro, valor em milésimos]`:
+`RicControlCallback()` (linha ~1571) decodifica uma mensagem E2SM-RC Control recebida do RIC. A convenção usada (documentada no próprio código) é uma lista de pares `[id do parâmetro, valor em milésimos]`:
 
 | id | Parâmetro | Origem esperada |
 |---|---|---|
@@ -350,7 +351,7 @@ Quando o RIC confirma uma assinatura (`KpmSubscriptionCallback()`, linha ~1739),
 
 ### 11.4 Convivência entre xApp real e emulação interna
 
-Como não existe (neste ambiente) um xApp MRO/MLB publicado rodando no RIC, o exemplo mantém uma **emulação interna** desses dois xApps ([seção 9](#9-os-xapps-mro-e-mlb)), que roda sempre — inclusive com `--useE2=1`. Quando uma decisão chega via E2 (`ApplyRicDecision()`, linha ~1907), a célula marca aquele parâmetro específico como "propriedade" de um xApp real:
+Como não existe (neste ambiente) um xApp MRO/MLB publicado rodando no RIC, o exemplo mantém uma **emulação interna** desses dois xApps ([seção 9](#9-os-xapps-mro-e-mlb)), que roda sempre — inclusive com `--useE2=1`. Quando uma decisão chega via E2 (`ApplyRicDecision()`, linha ~1623), a célula marca aquele parâmetro específico como "propriedade" de um xApp real:
 
 ```cpp
 bs.ricOwned.insert(d.parameter);
@@ -370,7 +371,7 @@ Toda decisão de um xApp real, decodificada aqui, é aplicada diretamente — a 
 
 ## 12. Arquivos de saída
 
-`OpenTraceFiles()` (linha ~803) cria, em `--outputDir`, o mesmo conjunto de arquivos do repositório de referência, com o mesmo esquema de colunas — o que permite reaproveitar diretamente qualquer script de análise já escrito para os CSVs originais.
+`OpenTraceFiles()` (linha ~696) cria, em `--outputDir`, o mesmo conjunto de arquivos do repositório de referência, com o mesmo esquema de colunas — o que permite reaproveitar diretamente qualquer script de análise já escrito para os CSVs originais.
 
 ### 12.1 CSVs (um valor por linha de tempo, exceto os eventos)
 
@@ -378,13 +379,13 @@ Toda decisão de um xApp real, decodificada aqui, é aplicada diretamente — a 
 |---|---|---|---|
 | `avail.csv` | `time, availability` | 1 s | Disponibilidade média (1 − carga) das 19 células. |
 | `satis.csv` | `time, satisfaction` | 1 s | Satisfação média dos UEs conectados (PRBs alocados / necessários). |
-| `lb.csv` | `time, lb ratio` | 1 s | Índice de Jain sobre a carga das 19 células (`JainFairness()`, linha ~435). |
+| `lb.csv` | `time, lb ratio` | 1 s | Índice de Jain sobre a carga das 19 células (`JainFairness()`, linha ~353). |
 | `cb.csv` | `time, user, x pos, y pos` | por evento | Um registro por bloqueio de chamada. |
 | `rlf.csv` | `time, current bs, user, conn_sinr, x pos, y pos` | por evento | Um registro por falha de enlace de rádio. |
 | `ho.csv` | `time, previous bs, current bs, user, conn_sinr, x pos, y pos` | por evento | Um registro por handover. |
 | `pp.csv` | `time, current bs, user, conn_sinr, x pos, y pos, ho pp time` | por evento | Um registro por handover classificado como ping-pong. |
 | `bs-<id>.csv` | `time, current bs, availability, cio, hyst, ttt` | 1 s | Série temporal por célula dos três parâmetros disputados. |
-| `summary.txt` | — | fim da execução | Resumo agregado (ver `WriteSummary()`, linha ~1695), também impresso no terminal. |
+| `summary.txt` | — | fim da execução | Resumo agregado (ver `WriteSummary()`, linha ~1426), também impresso no terminal. |
 
 ### 12.2 Log de conflitos
 
@@ -394,7 +395,7 @@ Não existe mais aqui: `nori-cmf.cc` não detecta conflitos, então não há `co
 
 ## 13. Parâmetros de linha de comando
 
-Todos os parâmetros abaixo são definidos em `CmfConfig` (linha ~127) e expostos via `CommandLine` em `main()` (linha ~1940).
+Todos os parâmetros abaixo são definidos em `CmfConfig` (linha ~111) e expostos via `CommandLine` em `main()` (linha ~1655).
 
 | Flag | Padrão | Descrição |
 |---|---|---|
