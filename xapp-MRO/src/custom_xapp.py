@@ -78,6 +78,7 @@ MRO_REQUESTOR_ID = 1004
 # control requests every reporting period.
 DECISION_EPSILON = 1e-6
 
+<<<<<<< HEAD
 # The Conflict Mitigation Framework xApp (see xapp-CMF): every decision below
 # is submitted here *before* being sent to the RAN, and only proceeds if
 # allowed. A short timeout with fail-open behaviour keeps a missing/crashed
@@ -86,6 +87,8 @@ DECISION_EPSILON = 1e-6
 CMF_EVALUATE_URL = "http://service-ricxapp-xappcmf-http.ricxapp:8080/ric/v1/cmf/evaluate"
 CMF_TIMEOUT_S = 2
 
+=======
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 class XappMro:
     """
@@ -497,17 +500,21 @@ class XappMro:
         if not decisions:
             return
 
+<<<<<<< HEAD
         cell_id = _parse_cell_id(cell_object_id)
         approved = self._filter_through_cmf(cell_id, decisions)
         if not approved:
             return
 
+=======
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
         self.logger.info(
             f"Cell {cell_object_id}: ho={ho_total} pp_ratio={pp_ratio:.1%} "
             f"rlf_ratio={rlf_ratio:.1%} -> hysteresis={new_hyst}dB ttt={new_ttt}s "
             f"(was hysteresis={current_hyst} ttt={current_ttt})"
         )
 
+<<<<<<< HEAD
         coded_pdu = self.build_ric_control_pdu(approved)
         rmrxapp.rmr_rts(sbuf, new_payload=coded_pdu, new_mtype=12040)  # RIC Control Request
 
@@ -549,6 +556,11 @@ class XappMro:
                 approved.append((parameter_id, value))
         return approved
 
+=======
+        coded_pdu = self.build_ric_control_pdu(decisions)
+        rmrxapp.rmr_rts(sbuf, new_payload=coded_pdu, new_mtype=12040)  # RIC Control Request
+
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
     def build_ric_control_pdu(self, decisions: List[Tuple[int, float]]) -> bytes:
         """
         Encodes an E2AP RIC Control Request PDU carrying an
@@ -844,6 +856,7 @@ class XappMro:
                 }
             ],
         }
+<<<<<<< HEAD
 
 
 def _parse_cell_id(cell_object_id: str) -> Optional[int]:
@@ -852,3 +865,5 @@ def _parse_cell_id(cell_object_id: str) -> Optional[int]:
         return int(cell_object_id.rsplit("_", 1)[1])
     except (IndexError, ValueError):
         return None
+=======
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38

@@ -4,8 +4,11 @@ The xApp-MRO is an OSC xApp that implements **Mobility Robustness Optimization (
 
 It is built from the same base as [`xapp-nori`](../xapp-nori), stripped of the RL/network-slicing logic and replaced with a closed-loop MRO controller.
 
+<<<<<<< HEAD
 > Deploy [`xapp-CMF`](../xapp-CMF) alongside this xApp and [`xapp-MLB`](../xapp-MLB) if you want conflicts between the two actually mitigated, not just detected/logged after the fact — see [Conflicts with MLB, and the CMF](#conflicts-with-mlb-and-the-cmf) below.
 
+=======
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 ## What it does
 
 The xApp subscribes to RAN Function ID 200 (KPM) on every registered E2 node. Each RIC Indication received from a cell carries, among other measurements:
@@ -33,9 +36,19 @@ The xApp is purely reactive and stateless across indications: every decision is 
 
 `HOMeasurementOffset` (CIO), `HOHysteresis` and `HOTimeToTrigger` jointly decide when a handover fires (they all enter the same A3-event inequality). If an MLB xApp is also adjusting CIO on the same cells this xApp is adjusting Hysteresis/TTT on, the two are structurally in an **indirect conflict** per the taxonomy of [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023): different parameters, same functional group (`CellAffectHandoverBoundary`).
 
+<<<<<<< HEAD
 Conflict detection and resolution are **not** done by this xApp, and not by `nori-cmf.cc` either: they are the job of a third xApp, [`xapp-CMF`](../xapp-CMF), which implements the Conflict Detection (DCD/ICD/ImCD) and Conflict Resolution Agents of [Adamczyk & Kliks, IEEE ComMag 2023](https://arxiv.org/abs/2305.07117). Before this xApp sends a RIC Control Request for a new Hysteresis/TTT value, it first submits the proposal to `xapp-CMF`'s `POST /ric/v1/cmf/evaluate` and only proceeds if the answer is `{"allowed": true}` — see [`xapp-CMF`'s README](../xapp-CMF/README.md) for the full protocol and the resolution modes (`none`, `prioMRO`, `prioMLB`). If `xapp-CMF` is unreachable, this call fails open (a warning is logged, and the decision proceeds unmitigated) rather than freezing RAN control on a missing dependency.
 
 Every detected conflict is logged by `xapp-CMF` to `/tmp/conflicts.json` inside its own pod, in the same JSON format documented in the reference repository.
+=======
+When both xApps run against `nori-cmf.cc`, its built-in Conflict Mitigation Framework detects this on every control round and, depending on `--cmMode`:
+
+- `none`: both decisions are applied — this is the "no CM" baseline of the reference paper;
+- `prioMRO`: this xApp's decision wins, the MLB xApp's CIO update for that round is dropped;
+- `prioMLB`: the MLB xApp's decision wins, this xApp's update for that round is dropped.
+
+Every detected conflict is logged by the simulator to `conflicts.json` in the scenario's output directory, in the same JSON format documented in the reference repository. See [`nori-cmf.md`](../ns-3-dev/contrib/nori/docs/nori-cmf.md#10-o-conflict-mitigation-framework-cmf) for the full CMF description.
+>>>>>>> 8d6507985e9043f9dd0d376a634f6354e7703e38
 
 ## Wire format
 
