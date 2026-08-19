@@ -1,40 +1,40 @@
 # xapp-CMF
 
-The xApp-CMF is an OSC xApp implementing the **Conflict Mitigation Framework (CMF)** proposed by Adamczyk & Kliks in *"Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"* (IEEE ComMag 2023, [arXiv:2305.07117](https://arxiv.org/abs/2305.07117)), as a standalone xApp on the Near-RT RIC — matching where the paper itself places it, rather than embedding it in the [`nori-cmf.cc`](../ns-3-dev/contrib/nori/examples/nori-cmf.cc) ns-3 scenario.
+O xApp-CMF é um xApp OSC que implementa o **Conflict Mitigation Framework (CMF)** proposto por Adamczyk & Kliks em *"Conflict Mitigation Framework and Conflict Detection in O-RAN Near-RT RIC"* (IEEE ComMag 2023, [arXiv:2305.07117](https://arxiv.org/abs/2305.07117)), como um xApp autônomo no Near-RT RIC — no mesmo lugar em que o próprio artigo o posiciona, em vez de embuti-lo no cenário ns-3 [`nori-cmf.cc`](../ns-3-dev/contrib/nori/examples/nori-cmf.cc).
 
-It is the third xApp of this project, alongside [`xapp-MRO`](../xapp-MRO) and [`xapp-MLB`](../xapp-MLB): those two propose handover-boundary changes, and this one is what decides whether a proposal that conflicts with another xApp's decision is actually allowed to reach the RAN.
+Ele é o terceiro xApp deste projeto, ao lado do [`xapp-MRO`](../xapp-MRO) e do [`xapp-MLB`](../xapp-MLB): esses dois propõem alterações nos limites de handover, e este é quem decide se uma proposta que conflita com a decisão de outro xApp pode de fato chegar à RAN.
 
-## Why a separate xApp
+## Por que um xApp separado
 
-`nori-cmf.cc` used to include its own conflict detection/mitigation logic, directly inside the ns-3 process. That is not how the reference paper defines the CMF: it is explicitly a component of the Near-RT RIC's Conflict Mitigation (CM) entity (Fig. 2 of the paper), independent of any particular RAN or E2 node implementation, and meant to mitigate conflicts between **any** xApps deployed on that RIC — not just the ones a given simulator happens to know about. `nori-cmf.cc` is now *only* the RAN + E2 node scenario: it applies whatever RIC Control Request it receives, from whichever xApp sent it, with no arbitration of its own. All conflict detection and resolution logic now lives here.
+O `nori-cmf.cc` costumava incluir sua própria lógica de detecção/mitigação de conflitos, diretamente dentro do processo ns-3. Não é assim que o artigo de referência define o CMF: ele é explicitamente um componente da entidade de Conflict Mitigation (CM) do Near-RT RIC (Fig. 2 do artigo), independente de qualquer implementação particular de RAN ou de nó E2, e destinado a mitigar conflitos entre **quaisquer** xApps implantados naquele RIC — não apenas os que um determinado simulador conhece. O `nori-cmf.cc` agora é *apenas* o cenário de RAN + nó E2: ele aplica qualquer RIC Control Request que receba, de qualquer xApp que a tenha enviado, sem nenhuma arbitragem própria. Toda a lógica de detecção e resolução de conflitos agora vive aqui.
 
-## The three components
+## Os três módulos
 
-Following Section III of the paper exactly:
+Seguindo exatamente a Seção III do artigo:
 
-| Module | File | Role |
+| Módulo | Arquivo | Função |
 |---|---|---|
-| **CD Agent** (Conflict Detection) | [`src/cd_agent.py`](src/cd_agent.py) | Implements **DCD** (Direct Conflict Detection) and **ICD** (Indirect Conflict Detection). Both are *pre-action*: every proposed decision is checked against a database of currently-in-effect decisions before it is allowed to take effect. |
-| **CR Agent** (Conflict Resolution) | [`src/cr_agent.py`](src/cr_agent.py) | Decides, for a proposal the CD Agent flagged as conflicting, whether it is allowed. Implements the same simple prioritization scheme the paper evaluates: `none` (detect only), `prioMRO`, `prioMLB`. |
-| **PMon** (Performance Monitoring) | [`src/pmon.py`](src/pmon.py) | Feeds **ImCD** (Implicit Conflict Detection), which is inherently *post-action*: it watches a RAN KPI (mean UE satisfaction per cell) and, when it drops significantly, correlates the drop against the CD Agent's own record of which xApps recently touched that cell. |
+| **CD Agent** (Conflict Detection Agent) | [`src/cd_agent.py`](src/cd_agent.py) | Implementa o **DCD** (Direct Conflict Detection) e o **ICD** (Indirect Conflict Detection). Ambos são *pré-ação*: toda decisão proposta é verificada contra uma base de decisões atualmente em vigor antes de ser autorizada a entrar em efeito. |
+| **CR Agent** (Conflict Resolution Agent) | [`src/cr_agent.py`](src/cr_agent.py) | Decide, para uma proposta sinalizada como conflitante pelo CD Agent, se ela é permitida. Implementa o mesmo esquema simples de priorização que o artigo avalia: `none` (apenas detecta), `prioMRO`, `prioMLB`. |
+| **PMon** (Performance Monitoring) | [`src/pmon.py`](src/pmon.py) | Alimenta o **ImCD** (Implicit Conflict Detection), que é inerentemente *pós-ação*: observa um KPI da RAN (satisfação média das UEs por célula) e, quando ele cai de forma significativa, correlaciona a queda com o próprio registro do CD Agent sobre quais xApps atuaram recentemente naquela célula. |
 
-### DCD — Direct Conflict Detection
+### DCD — Detecção Direta de Conflitos
 
-Two xApps writing the **same parameter** of the same cell with different values. In the current deployment (only MRO and MLB, writing disjoint parameters) this should not occur — it is implemented for completeness and as the fail-safe the paper describes it as ("in case of human error leading to deployment of directly conflicting xApps"), and will trigger correctly if a second xApp ever targets `HOHysteresis`, `HOTimeToTrigger` or `HOMeasurementOffset`.
+Dois xApps escrevendo o **mesmo parâmetro** da mesma célula com valores diferentes. Na implantação atual (apenas MRO e MLB, escrevendo parâmetros disjuntos) isso não deveria ocorrer — está implementado por completude e como a salvaguarda (*fail-safe*) que o artigo descreve ("em caso de erro humano que leve à implantação de xApps diretamente conflitantes"), e disparará corretamente se um segundo xApp algum dia direcionar `HOHysteresis`, `HOTimeToTrigger` ou `HOMeasurementOffset`.
 
-### ICD — Indirect Conflict Detection
+### ICD — Detecção Indireta de Conflitos
 
-Two xApps writing **different parameters of the same functional group**. `HOMeasurementOffset` (CIO), `HOHysteresis` and `HOTimeToTrigger` are all registered under the group `CellAffectHandoverBoundary` (see `PARAMETER_GROUPS` in `cd_agent.py`) because together they decide when a handover fires. This is the conflict type that structurally occurs between MRO and MLB in this deployment, and the one exercised on essentially every control round both are active.
+Dois xApps escrevendo **parâmetros diferentes do mesmo grupo funcional**. `HOMeasurementOffset` (CIO), `HOHysteresis` e `HOTimeToTrigger` estão todos registrados sob o grupo `CellAffectHandoverBoundary` (ver `PARAMETER_GROUPS` em `cd_agent.py`), pois juntos decidem quando um handover é disparado. Este é o tipo de conflito que ocorre estruturalmente entre MRO e MLB nesta implantação, e o que é exercitado em praticamente toda rodada de controle em que ambos estão ativos.
 
-### ImCD — Implicit Conflict Detection
+### ImCD — Detecção Implícita de Conflitos
 
-Cannot prevent a conflicting decision from taking effect — by the time it is detected, it already has. PMon tracks `QoS.MeanUeSatisfactionPermille` per cell (reported by `nori-cmf.cc` in every KPM indication); a relative drop past a threshold is checked against the CD Agent's database for that cell, and if more than one xApp had a decision in effect there, a correlated-occurrence counter is incremented. Only after a few correlated occurrences (not a single noisy sample) is the implicit conflict actually reported.
+Não é capaz de impedir que uma decisão conflitante entre em efeito — quando é detectada, ela já ocorreu. O PMon acompanha `QoS.MeanUeSatisfactionPermille` por célula (reportado pelo `nori-cmf.cc` em cada indicação KPM); uma queda relativa acima de um limiar é verificada contra a base de dados do CD Agent para aquela célula, e se mais de um xApp tinha uma decisão em vigor ali, um contador de ocorrências correlacionadas é incrementado. Somente após algumas ocorrências correlacionadas (não uma única amostra ruidosa) o conflito implícito é de fato reportado.
 
-## How MRO and MLB talk to this xApp
+## Como o MRO e o MLB se comunicam com este xApp
 
-There is no practical way to have this xApp transparently intercept a `RIC_CONTROL_REQ` RMR message addressed to `e2term`: MRO and MLB target a *specific* E2 node/cell by replying (`rmr_rts`) along the same connection their KPM indication arrived on, and that reply-route is only usable by the process that received the original message — a third process cannot forward it on their behalf without losing the routing context.
+Não há uma forma prática de este xApp interceptar de modo transparente uma mensagem RMR `RIC_CONTROL_REQ` endereçada ao `e2term`: o MRO e o MLB direcionam um nó/célula E2 *específico* respondendo (`rmr_rts`) pela mesma conexão em que sua indicação KPM chegou, e essa rota de resposta só pode ser usada pelo processo que recebeu a mensagem original — um terceiro processo não pode retransmiti-la em nome deles sem perder o contexto de roteamento.
 
-Instead, this xApp exposes a synchronous HTTP endpoint, and MRO/MLB call it **before** ever building or sending a RIC Control Request:
+Em vez disso, este xApp expõe um endpoint HTTP síncrono, e o MRO/MLB o chamam **antes** de sequer montar ou enviar uma RIC Control Request:
 
 ```
 POST /ric/v1/cmf/evaluate
@@ -44,32 +44,32 @@ POST /ric/v1/cmf/evaluate
 -> 200 {"allowed": false, "reason": "ICD indirect conflict with MLB's 'HOMeasurementOffset'=3.0 on cell 12 (prioritized: MLB)"}
 ```
 
-`parameterId` follows the same convention already decoded by `RicControlCallback()` in `nori-cmf.cc`: `1` = `HOMeasurementOffset` (CIO), `2` = `HOHysteresis`, `3` = `HOTimeToTrigger`. If a proposal is rejected, MRO/MLB simply do not send that parameter's RIC Control Request this round — exactly as if the CMF had silently dropped it, matching the old embedded behaviour, except the decision is now blocked **before** ever reaching the RAN, not after.
+`parameterId` segue a mesma convenção já decodificada por `RicControlCallback()` no `nori-cmf.cc`: `1` = `HOMeasurementOffset` (CIO), `2` = `HOHysteresis`, `3` = `HOTimeToTrigger`. Se uma proposta for rejeitada, o MRO/MLB simplesmente não envia a RIC Control Request daquele parâmetro nesta rodada — exatamente como se o CMF a tivesse descartado silenciosamente, reproduzindo o comportamento antigo (embutido), exceto que agora a decisão é bloqueada **antes** de chegar à RAN, não depois.
 
-This call has a short timeout and **fails open**: if the CMF xApp is unreachable (not deployed, still starting, or crashed), MRO/MLB proceed as if conflict mitigation were disabled, rather than freezing RAN control entirely on a missing dependency. A warning is logged every time this happens.
+Essa chamada tem um timeout curto e **falha aberta** (*fails open*): se o xApp CMF estiver inacessível (não implantado, ainda inicializando, ou em crash), o MRO/MLB prosseguem como se a mitigação de conflitos estivesse desabilitada, em vez de travar todo o controle da RAN por causa de uma dependência ausente. Um aviso é registrado (log) toda vez que isso acontece.
 
-Independently of the evaluate endpoint, this xApp also subscribes to KPM (RAN Function 200) on every registered E2 node, purely to feed PMon — it never writes any RAN parameter itself.
+Independentemente do endpoint de avaliação, este xApp também se inscreve em KPM (RAN Function 200) em todo nó E2 registrado, unicamente para alimentar o PMon — ele nunca escreve nenhum parâmetro de RAN por conta própria.
 
-## Configuring the resolution mode
+## Configurando o modo de resolução
 
-Set in `src/custom_xapp.py`:
+Definido em `src/custom_xapp.py`:
 
 ```python
-CM_MODE = CrMode.PRIO_MRO  # or CrMode.PRIO_MLB, or CrMode.NONE
+CM_MODE = CrMode.PRIO_MRO  # ou CrMode.PRIO_MLB, ou CrMode.NONE
 ```
 
-matching the three modes the paper's own evaluation compares (`CMF disabled`, `prioritize MRO`, `prioritize MLB`).
+correspondendo aos três modos que a própria avaliação do artigo compara (`CMF desabilitado`, `priorizar MRO`, `priorizar MLB`).
 
-## Requirements
+## Requisitos
 
-Same as [`xapp-MRO`](../xapp-MRO/README.md#requirements) and [`xapp-MLB`](../xapp-MLB/README.md#requirements) — an OpenRAN@Brasil Blueprint VM with a healthy Near-RT RIC and a local registry at `127.0.0.1:5001`.
+Os mesmos do [`xapp-MRO`](../xapp-MRO/README.md#requisitos) e do [`xapp-MLB`](../xapp-MLB/README.md#requisitos) — uma VM do OpenRAN@Brasil Blueprint com um Near-RT RIC saudável e um registro local de imagens em `127.0.0.1:5001`.
 
-## Deploying to the Near-RT RIC
+## Embarcando no Near-RT RIC
 
-Follow the same step-by-step as [`xapp-MRO`'s README](../xapp-MRO/README.md#deploying-to-the-near-rt-ric-step-by-step) (build/install via `bash update_xapp.sh`, confirm the pod, resubscribe once `nori-cmf` is connected), replacing every `xappmro` with `xappcmf`. **Deploy this xApp before, or at the same time as, MRO/MLB** — while it is missing, MRO/MLB still work (fail-open), but no conflict is ever actually mitigated, only whatever the individual xApp decided on its own.
+Siga o mesmo passo a passo do [README do `xapp-MRO`](../xapp-MRO/README.md#embarcando-no-near-rt-ric-passo-a-passo) (build/instalação via `bash update_xapp.sh`, confirmar o pod, reinscrever assim que o `nori-cmf` estiver conectado), substituindo todo `xappmro` por `xappcmf`. **Implante este xApp antes, ou ao mesmo tempo, que o MRO/MLB** — enquanto ele estiver ausente, o MRO/MLB ainda funcionam (falha aberta), mas nenhum conflito é de fato mitigado, apenas o que cada xApp decidiu por conta própria.
 
-## Observability
+## Observabilidade
 
-- `kubectl logs` shows one line per evaluated proposal that resulted in a conflict, e.g. `Cell 12: MLB proposes HOMeasurementOffset=3.0 -> REJECTED (ICD indirect conflict with MRO's 'HOHysteresis'=1.5 on cell 12 (prioritized: MRO))`.
-- Every detected conflict (DCD, ICD or ImCD) is appended as one JSON line to `/tmp/conflicts.json` inside the pod, in the same message shape as `json_messages/{DCD,ICD,ImCD}/*signal conflict.json` in the reference repository ([`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023)).
-- If `self.save_influx = True` (the default), every evaluation is written to InfluxDB in measurement `cmf_evaluations` (`cellId`, `source`, `parameter`, `value`, `conflicts`, `allowed`), and every implicit conflict in `cmf_conflicts`.
+- O `kubectl logs` mostra uma linha por proposta avaliada que resultou em conflito, por exemplo: `Cell 12: MLB proposes HOMeasurementOffset=3.0 -> REJECTED (ICD indirect conflict with MRO's 'HOHysteresis'=1.5 on cell 12 (prioritized: MRO))`.
+- Todo conflito detectado (DCD, ICD ou ImCD) é anexado como uma linha JSON em `/tmp/conflicts.json` dentro do pod, no mesmo formato de mensagem de `json_messages/{DCD,ICD,ImCD}/*signal conflict.json` no repositório de referência ([`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023)).
+- Se `self.save_influx = True` (padrão), toda avaliação é gravada no InfluxDB na medição `cmf_evaluations` (`cellId`, `source`, `parameter`, `value`, `conflicts`, `allowed`), e todo conflito implícito em `cmf_conflicts`.
