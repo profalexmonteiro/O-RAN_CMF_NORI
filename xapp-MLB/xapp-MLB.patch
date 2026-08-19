@@ -1,0 +1,1567 @@
+diff --git a/README.md b/README.md
+index 503d61c..6f101b7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,51 +1,189 @@
+-# xapp-nori
+-The xApp-NORI is an OSC xApp for interacting with gNBs simulated by the NORI NS-3 module.
++# xapp-MLB
+ 
+-This xApp sends a subscription request for the RAN Function ID 200 to all E2 nodes registered at the Near-RT RIC. The E2 Nodes should then start sending RIC Indication messages containing information about the RAN. The xApp responds to each message with a XXXXXXXXXXXX message.
++The xApp-MLB is an OSC xApp that implements **Mobility Load Balancing (MLB)** for gNBs simulated by the NORI NS-3 module, in particular the [`nori-cmf.cc`](../ns-3-dev/contrib/nori/examples/nori-cmf.cc) scenario (see [`contrib/nori/docs/nori-cmf.md`](../ns-3-dev/contrib/nori/docs/nori-cmf.md) for the full scenario description).
++
++It is built from the same base as [`xapp-nori`](../xapp-nori), stripped of the RL/network-slicing logic and replaced with a closed-loop MLB controller. It is the counterpart of [`xapp-MRO`](../xapp-MRO): together they are the two xApps whose conflicting decisions the Conflict Mitigation Framework (CMF) of `nori-cmf.cc` is designed to detect and mitigate.
++
++## What it does
++
++The xApp subscribes to RAN Function ID 200 (KPM) on every registered E2 node. Each RIC Indication received from a cell carries, among other measurements:
++
++- `RRU.PrbUsedDl` — physical resource blocks currently in use on this cell;
++- `RRU.PrbAvailDl` — physical resource blocks available on this cell;
++- `MLB.CioMilliDb` — the Cell Individual Offset (CIO) currently active on the cell;
++- `MRO.HysteresisMilliDb` / `MRO.TimeToTriggerMs` — the handover Hysteresis and Time-To-Trigger currently active (read-only here — those parameters belong to the MRO xApp).
++
++On every indication, the xApp:
++
++1. Computes the cell's load (`RRU.PrbUsedDl / RRU.PrbAvailDl`).
++2. Maps the load to a target CIO using the same step table published in [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023) and reproduced in `nori-cmf.cc`: more loaded cells get a larger CIO, which — combined with the handover A3 condition — makes the cell less attractive both for handovers in and for new admissions, pushing traffic toward less loaded neighbours.
++3. Compares the result against the cell's currently active CIO (also read from the same indication).
++4. If it differs, sends a RIC Control Request back to that same cell — and only that cell — carrying the new value.
++
++The xApp is purely reactive and stateless across indications: every decision is recomputed from scratch from what the cell reports *right now*. This means it self-corrects automatically if a previous decision was overridden or dropped elsewhere in the loop (see "Conflicts with MRO" below) — it will simply keep proposing the same value every period until it is accepted.
++
++**The xApp never writes `HOHysteresis` or `HOTimeToTrigger`** — those parameters are the responsibility of a separate MRO (Mobility Robustness Optimization) xApp. Running both against the same cells is what exercises the Conflict Mitigation Framework described below.
++
++## Conflicts with MRO, and the CMF
++
++`HOMeasurementOffset` (CIO), `HOHysteresis` and `HOTimeToTrigger` jointly decide when a handover fires (they all enter the same A3-event inequality). If an MRO xApp is also adjusting Hysteresis/TTT on the same cells this xApp is adjusting CIO on, the two are structurally in an **indirect conflict** per the taxonomy of [`czezy/O-RAN_CMF_CM2023`](https://github.com/czezy/O-RAN_CMF_CM2023): different parameters, same functional group (`CellAffectHandoverBoundary`).
++
++When both xApps run against `nori-cmf.cc`, its built-in Conflict Mitigation Framework detects this on every control round and, depending on `--cmMode`:
++
++- `none`: both decisions are applied — this is the "no CM" baseline of the reference paper;
++- `prioMLB`: this xApp's decision wins, the MRO xApp's Hysteresis/TTT update for that round is dropped;
++- `prioMRO`: the MRO xApp's decision wins, this xApp's CIO update for that round is dropped.
++
++Every detected conflict is logged by the simulator to `conflicts.json` in the scenario's output directory, in the same JSON format documented in the reference repository. See [`nori-cmf.md`](../ns-3-dev/contrib/nori/docs/nori-cmf.md#10-o-conflict-mitigation-framework-cmf) for the full CMF description.
++
++## Wire format
++
++There is no standardized E2SM-RC payload for handover-boundary parameters, so this xApp uses the same convention `nori-cmf.cc`'s `RicControlCallback()` decodes:
++
++- RIC Control Request targets **RAN Function ID 300** (RIC Control), the function ID `nori-cmf.cc` registers for control messages.
++- The control message is a standard `E2SM-RC-ControlMessage-Format1` whose `ranParameters-List` carries one `RANParameter-Item` per changed parameter:
++
++  | `ranParameterItem-ID` | Parameter | Written by |
++  |---|---|---|
++  | 1 | `HOMeasurementOffset` (CIO) | **this xApp** |
++  | 2 | `HOHysteresis` | MRO xApp (not this one) |
++  | 3 | `HOTimeToTrigger` | MRO xApp (not this one) |
++
++- Each item's value is an `INTEGER` (`valueInt`) in **milli-dB**, since the underlying ASN.1 type has no native decimal representation. This xApp only ever sends item id 1.
++- The RIC Control Header (`E2SM-RC-ControlHeader-Format1`) is filled with placeholder `ueId`/style/action values (this control is cell-scoped, not UE-scoped) and omits the optional `rrmPolicyList`, which is specific to RAN-slicing control and unrelated to MLB.
++
++See `build_ric_control_pdu()` in [`src/custom_xapp.py`](src/custom_xapp.py) for the exact encoding.
++
++> **Note on the underlying nori module**: making this control path actually work end-to-end required three small fixes to `contrib/nori/model/{asn1c-types,ric-control-message}.cc` in the ns-3 `nori` module — the generic `ranParameters-List` decoder was previously stubbed out to always return an empty list, `RANParameterItem` had a double-free bug when copied (the parameter ID was unreachable from outside the class as a result), and the optional `rrmPolicyList` field of the control header was dereferenced unconditionally. All three are fixed in the `nori` module this xApp was developed against; if you see decoded control messages coming back empty, or a crash when a control request without slicing policies arrives, check that your `nori` checkout includes those fixes (they were introduced together with [`xapp-MRO`](../xapp-MRO), which uses the exact same control path).
++
++## Requirements
+ 
+ All commands assume:
+-- You are running an [OpenRAN@Brasil Blueprint v1](https://github.com/LABORA-INF-UFG/openran-br-blueprint/wiki/OpenRAN@Brasil-Blueprint-v1) VM
+-- NORI is already installed, configured, running and registered at the Near-RT RIC
+-- You are inside the repository folder `xapp-nori/`
+ 
+-## How to use
++- You are running an [OpenRAN@Brasil Blueprint v1](https://github.com/LABORA-INF-UFG/openran-br-blueprint/wiki/OpenRAN@Brasil-Blueprint-v1) VM, with `kubectl`, `docker` and `dms_cli` available and a local image registry reachable at `127.0.0.1:5001`
++- A Near-RT RIC platform (`ricplt` namespace) is deployed and healthy
++- You are inside the repository folder `xapp-MLB/`
++
++## Deploying to the Near-RT RIC, step by step
++
++This walks through everything from "the RIC is up" to "seeing the MLB control loop actually move a cell's CIO". It was written from, and verified against, a real onboarding session on a live cluster — including the rough edges.
++
++### 1. Confirm the RIC platform is healthy
++
++```bash
++kubectl get pods -n ricplt
++```
+ 
+-Install the xApp:
++Every pod should show `1/1` or `2/2` under `READY`. If not, see [Troubleshooting the platform](#troubleshooting-the-platform) below before continuing — onboarding an xApp against a half-started RIC will onboard fine but subscriptions will fail.
++
++### 2. Build, push and install the xApp
+ 
+ ```bash
+ bash update_xapp.sh
+ ```
+ 
+-Get the xApp logs:
++This one script does everything: it (a) onboards the xApp chart (`dms_cli onboard init/config-file.json init/schema.json`), (b) removes any previous `xappmlb` install/image, (c) `docker build`s the image and pushes it to `127.0.0.1:5001/xappmlb:1.0.0`, and (d) `dms_cli install`s it into the `ricxapp` namespace. A first build downloads and compiles `rmr`, clones `ric-plt-xapp-frame-py` and installs the Python dependencies — expect it to take several minutes the first time; later runs reuse Docker's layer cache and are much faster (the actual xApp code is only the last couple of layers).
++
++The script waits for the pod to reach `1/1` on its own and tails its first log lines. If instead you see `CrashLoopBackOff`, jump to [Troubleshooting the xApp](#troubleshooting-the-xapp).
++
++### 3. Confirm the pod is running
++
++```bash
++kubectl get pods -n ricxapp
++```
++
++You should see `ricxapp-xappmlb-...` at `1/1 Running`. At this point the xApp has already tried, once, to subscribe to every E2 node the RIC currently knows about (`RANFunctionID: 200`, i.e. KPM). Check what happened:
+ 
+ ```bash
+ bash log_xapp.sh
+ ```
+ 
+-If you want to test how NORI handles deleting subscriptions and accepting new ones:
++Look for lines like `Subscription response from <gNB>: status = 201, reason = Created` (success) versus `Failed to subscribe to node <gNB>. Status code: 503` (the E2 node isn't actually reachable, or `submgr` wasn't ready yet — very common right after either the RIC or the xApp just started, see below).
++
++### 4. Start (or confirm) `nori-cmf` is connected
++
++If it isn't running yet, find the `e2term` pod's IP and start the scenario in E2 mode from the `ns-3-dev` tree:
++
++```bash
++E2TERM_IP=$(kubectl get pods -n ricplt -o wide | grep e2term-alpha | awk '{print $6}')
++cd ~/ns-3-dev
++./ns3 run "nori-cmf --useE2=1 --ipE2TermRic=$E2TERM_IP"
++```
++
++Watch for `[INFO ] [SCTP] Sent E2-SETUP-REQUEST` for all 19 cells in the simulator's own output, and cross-check on the RIC side:
++
++```bash
++kubectl logs deployment-ricplt-e2mgr-* -n ricplt --tail=50 | grep CONNECTED
++```
++
++### 5. Resubscribe
++
++Because `nori-cmf` registers its 19 cells *after* the xApp pod already started (step 2/3 happened first), the xApp's initial subscription attempt in step 3 almost certainly missed them. Trigger a resubscribe:
+ 
+ ```bash
+ bash resubscribe.sh
+ ```
+ 
+-Uninstall the xApp:
++This call returns immediately (`xApp ACKs resubscription request, resubscribing in the background`) — the actual unsubscribe-then-subscribe cycle runs in a background thread inside the pod, not in the HTTP request. This matters because **a cluster that has accumulated many stale E2 node registrations over time can take a while to cycle through** (each stale/unreachable node still costs up to ~10 s before its subscribe attempt gives up) — don't assume "no immediate log line" means it failed; tail the logs and give it a minute or two on an old/heavily-used cluster:
+ 
+ ```bash
+-dms_cli uninstall xappnori ricxapp
++bash log_xapp.sh
+ ```
+ 
+-## Troubleshoot
++You want to see `201, reason = Created` for the gNBs your current `nori-cmf` run actually registered (their names look like `gnb_<mcc>_<mnc>_<...>`; cross-check against `kubectl get pods -n ricplt` → e2mgr logs, or just try the next step and see if data shows up).
+ 
+-If the xApp says no gNBs are registered, try redeploying the Near-RT RIC:
++### 6. Verify the control loop is actually closing
++
++Once subscribed to a live cell, the xApp logs one line per cell per indication *only when it decides to send a new CIO* (silent when its decision matches what's already active — which is most of the time once the loop stabilises):
++
++```bash
++bash log_xapp.sh | grep "Cell NRCellDU"
++```
++
++A healthy loop looks like this — note how each new line's `(was X)` matches the `-> cio=X` the *previous* line for that same cell sent, confirming the simulator actually applied it:
++
++```text
++Cell NRCellDU_8: load=76.0% (prb 76/100) -> cio=2.0dB (was 1.5)
++Cell NRCellDU_8: load=84.0% (prb 84/100) -> cio=2.5dB (was 2.0)
++Cell NRCellDU_8: load=96.0% (prb 96/100) -> cio=3.0dB (was 2.5)
++```
++
++You can cross-check the same values directly in the simulator's own output, in `<outputDir>/bs-8.csv` (the `cio` column) — they should match exactly.
++
++### 7. Tear down
++
++```bash
++dms_cli uninstall xappmlb ricxapp
++```
++
++---
++
++### Troubleshooting the platform
++
++If the xApp says no gNBs are registered and `kubectl get pods -n ricplt` shows something unhealthy, try redeploying the Near-RT RIC:
+ 
+ ```bash
+ bash redeploy_ric.sh
++watch kubectl get pods -n ricplt   # wait for every pod to reach 1/1 or 2/2
+ ```
+ 
+-Then, wait for all `ricplt` pods to be ready (with `1/1` or `2/2` on the `READY` column). You can check this with:
++**Known issue — `e2term` can crash on simulation teardown.** When `nori-cmf` exits, all 19 SCTP connections to `e2term` close in quick succession; this can trigger a pre-existing crash in the RIC's own `e2term` (`free(): invalid pointer`), unrelated to this xApp or to `nori-cmf.cc`. It happens intermittently (observed on roughly 2 out of 3 teardowns during development), and Kubernetes restarts the pod automatically — it takes about 1–2 minutes (the readiness probe has a startup delay) to come back to `1/1`:
+ 
+ ```bash
+-watch kubectl get pods -n ricplt
++watch kubectl get pods -n ricplt deployment-ricplt-e2term-alpha-*
+ ```
+ 
+-After the Near-RT RIC is ready, you can start NORI. Still, sometimes the gNBs do not register. This can happen because some Near-RT RIC components are still executing starting routines. As a workaround, stop and restart NORI again until it registers.
+\ No newline at end of file
++Don't start a new `nori-cmf` run against it until it's back to `1/1`.
++
++### Troubleshooting the xApp
++
++- **`CrashLoopBackOff` right after install**: `kubectl logs -n ricxapp <pod> --previous` almost always shows the Python traceback. If it's an `ImportError`, the image build likely failed partway (check `docker images | grep xappmlb` and re-run `update_xapp.sh`).
++- **Pod restarts with exit code 137 (`kubectl describe pod ... | grep -A3 "Last State"`)**: this is a Kubernetes-issued `SIGKILL`, almost always because the liveness probe (`GET /ric/v1/health/alive`, 1 s timeout) went unanswered for too long. The subscribe/unsubscribe/resubscribe paths use a per-request timeout and dispatch the resubscribe cycle to a background thread specifically to avoid this; if you still see it, it likely means the pod is under genuine resource pressure (check `kubectl top pod -n ricxapp`, and the node's overall memory with `free -h` — a small VM building Docker images and running the RIC platform at the same time can get tight).
++- **Sometimes gNBs just don't register even though the platform looks healthy**: this can happen while some Near-RT RIC components are still finishing their own startup routines right after `redeploy_ric.sh`. Stop and restart `nori-cmf`, or call `bash resubscribe.sh` again once the E2 nodes show up in `kubectl logs` on `e2mgr`.
++
++## Observability
++
++If `self.save_influx = True` (the default, see `src/custom_xapp.py`), every indication is written to InfluxDB in two measurements:
++
++- `cell_metrics` — the raw KPM dump (same shape as `xapp-nori`'s), one field per `pmType` reported by the cell;
++- `mlb_control` — one point per cell per indication with `prb_used`, `prb_avail`, `load`, `current_cio_db`, `new_cio_db` and (when reported) `current_hysteresis_db`/`current_ttt_s` — everything needed to plot the MLB control loop over time on Grafana.
+diff --git a/init/config-file.json b/init/config-file.json
+index d5c8ade..afdffe8 100644
+--- a/init/config-file.json
++++ b/init/config-file.json
+@@ -1,12 +1,12 @@
+ {
+-    "name": "xappnori",
++    "name": "xappmlb",
+     "version": "1.0.0",
+     "containers": [
+         {
+-            "name": "xappnoricontainer",
++            "name": "xappmlbcontainer",
+             "image": {
+                 "registry": "127.0.0.1:5001",
+-                "name": "xappnori",
++                "name": "xappmlb",
+                 "tag": "1.0.0"
+             }
+         }
+@@ -15,22 +15,22 @@
+         "ports": [
+             {
+                 "name": "http",
+-                "container": "xappnoricontainer",
++                "container": "xappmlbcontainer",
+                 "port": 8080,
+                 "description": "http service"
+             },
+             {
+                 "name": "rmrroute",
+-                "container": "xappnoricontainer",
++                "container": "xappmlbcontainer",
+                 "port": 4561,
+                 "description": "rmr route port for bouncer xapp"
+             },
+             {
+                 "name": "rmrdata",
+-                "container": "xappnoricontainer",
++                "container": "xappmlbcontainer",
+                 "port": 4560,
+-                "rxMessages": ["RIC_SUB_RESP","RIC_SUB_DEL_RESP", "RIC_INDICATION", "TS_UE_LIST"],
+-                "txMessages": ["RIC_SUB_REQ","RIC_SUB_DEL_REQ", "RIC_CONTROL_REQ", "TS_QOE_PRED_REQ"],
++                "rxMessages": ["RIC_SUB_RESP","RIC_SUB_DEL_RESP", "RIC_INDICATION"],
++                "txMessages": ["RIC_SUB_REQ","RIC_SUB_DEL_REQ", "RIC_CONTROL_REQ"],
+                 "policies": [1],
+                 "description": "rmr data port"
+             }
+diff --git a/install_influx_grafana.sh b/install_influx_grafana.sh
+old mode 100644
+new mode 100755
+diff --git a/log_xapp.sh b/log_xapp.sh
+old mode 100644
+new mode 100755
+index 61f0f77..545d873
+--- a/log_xapp.sh
++++ b/log_xapp.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappmlb"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"
+diff --git a/redeploy_ric.sh b/redeploy_ric.sh
+old mode 100644
+new mode 100755
+diff --git a/resubscribe.sh b/resubscribe.sh
+old mode 100644
+new mode 100755
+index f42f4b8..23b5a67
+--- a/resubscribe.sh
++++ b/resubscribe.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappmlb"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"
+diff --git a/setup.py b/setup.py
+index 1da1cd3..8e97183 100644
+--- a/setup.py
++++ b/setup.py
+@@ -24,12 +24,12 @@ def read(fname):
+ 
+ 
+ setup(
+-    name='xappnori',
++    name='xappmlb',
+     version='0.0.1',
+     packages=find_packages(),
+     url='https://github.com/LABORA-INF-UFG/xapp-nori/',
+     license='Apache 2.0',
+-    description="xApp for interacting with NORI",
++    description="Mobility Load Balancing (MLB) xApp for NORI/nori-cmf",
+     author='Daniel Campos',
+     author_email='danielcampossilva@inf.ufg.br',
+     python_requires='>=3.8',
+diff --git a/src/custom_xapp.py b/src/custom_xapp.py
+index ed1b4b0..8bcb085 100644
+--- a/src/custom_xapp.py
++++ b/src/custom_xapp.py
+@@ -9,26 +9,71 @@ from ricxappframe import xapp_rest, xapp_subscribe
+ from ricxappframe.entities.rnib.nb_identity_pb2 import NbIdentity
+ 
+ # Imports from other libraries
+-from time import sleep
+ from threading import Thread
+ import signal
+ import json
++import math
+ import requests
+-import numpy as np
+-from typing import Dict
+-from .env import MobNet, server_rl
+-import csv
+-from pathlib import Path
+-from influxdb_client import InfluxDBClient, Point, WritePrecision
++from typing import Dict, List, Optional, Tuple
+ import datetime
+-from ray import tune
+-from ray.rllib.algorithms.algorithm import Algorithm
+-from ray.rllib.env.policy_client import PolicyClient
++from influxdb_client import InfluxDBClient, Point, WritePrecision
++
++
++# ---------------------------------------------------------------------------
++# MLB decision table
++#
++# Mirrors, value for value, LoadToCio() of the nori-cmf.cc ns-3 example
++# (contrib/nori/examples/nori-cmf.cc), which in turn reproduces the table
++# published in https://github.com/czezy/O-RAN_CMF_CM2023. Keeping both
++# implementations bit-for-bit identical is what lets this xApp and the
++# built-in MLB emulation of nori-cmf.cc converge to the same decision for the
++# same observed load, whichever one is actually driving a given cell.
++# ---------------------------------------------------------------------------
++
++
++def load_to_cio(load: float) -> float:
++    """Cell load (0..1) -> Cell Individual Offset [dB].
++    0.00% - 45.45% -> 0 dB, then +0.5 dB every 9.09% (1/11), up to 3.5 dB at 100%.
++    """
++    idx = min(max(int(math.floor(load * 11.0)), 0), 11)
++    return 0.5 * max(0, idx - 4)
++
+ 
++# RAN parameter IDs, matching the RicControlCallback() convention in nori-cmf.cc.
++RAN_PARAM_CIO = 1  # HOMeasurementOffset, written by this xApp
++RAN_PARAM_HYSTERESIS = 2  # HOHysteresis, written by the MRO xApp (read-only here)
++RAN_PARAM_TTT = 3  # HOTimeToTrigger, written by the MRO xApp (read-only here)
+ 
+-class XappNori:
++# ricRequestorID used for control requests issued by this xApp. Distinct from
++# the TS/QoS/RAN_SLICING IDs (1001/1002/1003) and from the MRO xApp's 1004;
++# not otherwise interpreted by nori-cmf.cc, which decodes the control message
++# content regardless of this value.
++MLB_REQUESTOR_ID = 1005
++
++# Decisions are only re-sent when they differ from the last value reported by
++# the cell by more than this tolerance, to avoid flooding RMR with no-op
++# control requests every reporting period.
++DECISION_EPSILON = 1e-6
++
++
++class XappMlb:
+     """
+-    Custom xApp class.
++    MLB (Mobility Load Balancing) xApp for the NORI ns-3 module.
++
++    Subscribes to the KPM RAN function (200) of every registered E2 node. On
++    each RIC Indication, it reads the cell's PRB utilisation exposed by the
++    nori-cmf.cc scenario, computes the same Cell Individual Offset (CIO)
++    decision the scenario's built-in MLB emulation would compute, and-when it
++    differs from what the cell currently has-writes it back as a RIC Control
++    Request on the RAN Control function (300).
++
++    This xApp only ever touches HOMeasurementOffset (CIO). It never writes
++    HOHysteresis or HOTimeToTrigger: those parameters are the MRO xApp's
++    responsibility. Because all three parameters live in the same
++    "CellAffectHandoverBoundary" group, running this xApp alongside an MRO
++    xApp against nori-cmf.cc exercises the Conflict Mitigation Framework (CMF)
++    exactly as described in https://github.com/czezy/O-RAN_CMF_CM2023 and in
++    contrib/nori/docs/nori-cmf.md.
+     """
+ 
+     def __init__(self):
+@@ -36,15 +81,13 @@ class XappNori:
+         Initializes the custom xApp instance and instatiates the xApp framework object.
+         """
+ 
+-        self.enable_ran_slicing = True # If false it only executes KPM without RC
+-        self.save_influx = True # If true it saves the data in InfluxDB
++        self.save_influx = True  # If true it saves the data in InfluxDB
+ 
+         # Initializing a logger for the custom xApp instance in Debug level (logs everything)
+         self.logger = Logger(
+-            name="XappNori", level=Level.DEBUG
++            name="XappMlb", level=Level.DEBUG
+         )  # The name is included in each log entry, Levels: DEBUG < INFO < WARNING < ERROR
+-        # self.logger.get_env_params_values() # Getting the MDC key-value pairs from the environment
+-        self.logger.info("Initializing the xApp.")
++        self.logger.info("Initializing the MLB xApp.")
+ 
+         # Initializing custom control variables
+         self._shutdown = False  # Stops the xApp loop if True
+@@ -66,17 +109,6 @@ class XappNori:
+             use_fake_sdl=False,  # Use a fake in-memory SDL
+         )
+ 
+-        # RL Server
+-        if self.enable_ran_slicing:
+-            self.slice_ues = {
+-                1 : ["00001", "00002",],
+-                2 : ["00003", "00004",],
+-            }
+-            self.env = MobNet(debug=True)
+-            self.env_thread = Thread(target=server_rl, daemon=True)
+-            self.env_thread.start()
+-
+-
+         # Registering RMR message handlers
+         self._rmrxapp.register_callback(
+             handler=self.ric_indication_handler, message_type=12050
+@@ -139,29 +171,6 @@ class XappNori:
+             self.bucket = "openranbr"  # your InfluxDB bucket name
+             self.client = InfluxDBClient(url=url, token=token, org=org)
+             self.write_api = self.client.write_api()
+-        
+-        if self.enable_ran_slicing:
+-            # RL Client
+-            sleep(10)
+-            SERVER_ADDRESS = "localhost"
+-            RAY_STORAGE = "./ray_results/"
+-            AGENT_NAME = "ppo"
+-            SERVER_BASE_PORT = 9900
+-            self.test_mode = False
+-            self.env.reset()
+-            if self.test_mode:  # Testing
+-                ray_storage = str(Path(RAY_STORAGE).resolve())
+-                analysis = tune.ExperimentAnalysis(f"{ray_storage}/{AGENT_NAME}/")
+-                assert analysis.trials is not None, "Analysis trial is None"
+-                last_checkpoint = analysis.get_last_checkpoint(analysis.trials[0])
+-                assert last_checkpoint is not None, "Last checkpoint is None"
+-                self.algo = Algorithm.from_checkpoint(last_checkpoint)
+-            else:  # Training
+-                self.client = PolicyClient(
+-                    f"http://{SERVER_ADDRESS}:{SERVER_BASE_PORT}",
+-                    inference_mode="local",
+-                )
+-                self.eid = self.client.start_episode(training_enabled=True)
+ 
+     # ------------------ START AND STOP
+ 
+@@ -207,95 +216,17 @@ class XappNori:
+ 
+     def log_gnbs(self):
+         """
+-        Logs RAN information for each registered gNB.
++        Logs which gNBs are currently registered at the Near-RT RIC.
+         """
+ 
+         nbid_list = self._rmrxapp.GetListNodebIds()
+         if len(nbid_list) == 0:
+             self.logger.info("No gNBs registered.")
+             return
+-        self.logger.info("Logging gNBs.")
+         for nbid in nbid_list:
+-            self.logger.info(f"Logging NodeB info for gNB: {nbid.inventory_name}")
+-            global_nb_id = nbid.global_nb_id
+-            self.logger.info(f"PLMN ID: {global_nb_id.plmn_id}")
+-            self.logger.info(f"NNBID: {global_nb_id.nb_id}")
+-            self.logger.info(f"Connection status: {nbid.connection_status}")  # 1 ????
+-            self.logger.info(
+-                f"Health Check Timestamp Received: {nbid.health_check_timestamp_received}"
+-            )  # 0 ???
+             self.logger.info(
+-                f"Health Check Timestamp Sent: {nbid.health_check_timestamp_sent}"
+-            )  # 0 ???
+-
+-            nbinfo = self._rmrxapp.GetNodeb(nbid.inventory_name)
+-            self.logger.info(
+-                f"Associated E2T Instance Address: {nbinfo.associated_e2t_instance_address}"
+-            )  # E2Term IP:PORT
+-            self.logger.info(
+-                f"E2 Application Protocol: {nbinfo.e2_application_protocol}"
+-            )  # 0 ???
+-            self.logger.info(f"Failure Type: {nbinfo.failure_type}")  # 0 ???
+-            self.logger.info(f"Node Type: {nbinfo.node_type}")  # 2 ????
+-            self.logger.info(
+-                f"RAN Name: {nbinfo.ran_name}"
+-            )  # Same as the inventory name
+-            self.logger.info(
+-                f"Setup From Network: {nbinfo.setup_from_network}"
+-            )  # True ??
+-
+-            gnb = nbinfo.gnb
+-            self.logger.info(f"GNB Type: {gnb.gnb_type}")  # 1 ????
+-            self.logger.info(
+-                f"Served NR Cells: {gnb.served_nr_cells}"
+-            )  # No cells informed
+-
+-            self.logger.info("NodeB Configurations:")
+-            i = 1
+-            for config in gnb.node_configs:
+-                self.logger.info(f"Configuration {i}")
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceType: {config.e2nodeComponentInterfaceType}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeE1: {config.e2nodeComponentInterfaceTypeE1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeF1: {config.e2nodeComponentInterfaceTypeF1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeNG: {config.e2nodeComponentInterfaceTypeNG}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeS1: {config.e2nodeComponentInterfaceTypeS1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeW1: {config.e2nodeComponentInterfaceTypeW1}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeX2: {config.e2nodeComponentInterfaceTypeX2}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentInterfaceTypeXn: {config.e2nodeComponentInterfaceTypeXn}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentRequestPart: {config.e2nodeComponentRequestPart}"
+-                )
+-                self.logger.info(
+-                    f"e2nodeComponentResponsePart: {config.e2nodeComponentResponsePart}"
+-                )
+-                i += 1
+-
+-            self.logger.info("RAN Functions:")
+-            for ran_func in gnb.ran_functions:
+-                self.logger.info(f"RAN Function ID: {ran_func.ran_function_id}")
+-                self.logger.info(
+-                    f"RAN Function Revision: {ran_func.ran_function_revision}"
+-                )
+-                self.logger.info(f"RAN Function OID: {ran_func.ran_function_oid}")
+-                self.logger.info(
+-                    f"RAN Function Definition: {ran_func.ran_function_definition}"
+-                )
++                f"Registered gNB: {nbid.inventory_name}, connection status: {nbid.connection_status}"
++            )
+ 
+     def subscribe_to_e2_nodes(self):
+         """
+@@ -303,7 +234,7 @@ class XappNori:
+         """
+         e2_nodes = self._rmrxapp.GetListNodebIds()
+         sub_trs_id = self._rmrxapp.sdl_get(
+-            namespace="xappnori", key="subscription_transaction_id"
++            namespace="xappmlb", key="subscription_transaction_id"
+         )
+         if sub_trs_id is None:
+             sub_trs_id = 54321
+@@ -317,10 +248,20 @@ class XappNori:
+                 node.inventory_name, sub_trs_id
+             )
+             self.logger.debug(f"Subscription request: {subscription_req}")
+-            resp = requests.post(
+-                "http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions",
+-                json=subscription_req,
+-            )
++            # A bounded timeout keeps one slow/unreachable E2 node from
++            # stalling this whole loop (and, with it, the HTTP thread serving
++            # the liveness probe) for an unbounded time.
++            try:
++                resp = requests.post(
++                    "http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions",
++                    json=subscription_req,
++                    timeout=10,
++                )
++            except requests.exceptions.RequestException as exc:
++                self.logger.warning(
++                    f"Subscribe request to node {node.inventory_name} failed: {exc}"
++                )
++                continue
+             status = resp.status_code
+             reason = resp.reason
+ 
+@@ -339,7 +280,7 @@ class XappNori:
+                 f"Subscription response from {node.inventory_name}: status = {status}, reason = {reason}, data = {data}"
+             )
+             self._rmrxapp.sdl_set(
+-                namespace="xappnori",
++                namespace="xappmlb",
+                 key="subscription_transaction_id",
+                 value=sub_trs_id + 1,
+             )  # Update sub_trs_id on SDL
+@@ -349,15 +290,24 @@ class XappNori:
+         Unsubscribes from all subscribed E2 nodes (stored in the self.subscription_responses dict).
+         """
+ 
+-        for sub_id in self.sub_id_to_node.keys():
+-            resp = requests.delete(
+-                f"http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions/{sub_id}"
+-            )
+-            status = resp.status_code
+-            reason = resp.reason
+-            self.logger.info(
+-                f"Unsubscribe from sub id {sub_id}: status = {status}, reason = {reason}"
+-            )
++        for sub_id in list(self.sub_id_to_node.keys()):
++            try:
++                resp = requests.delete(
++                    f"http://service-ricplt-submgr-http.ricplt.svc.cluster.local:8088/ric/v1/subscriptions/{sub_id}",
++                    timeout=10,
++                )
++                self.logger.info(
++                    f"Unsubscribe from sub id {sub_id}: status = {resp.status_code}, reason = {resp.reason}"
++                )
++            except requests.exceptions.RequestException as exc:
++                self.logger.warning(f"Unsubscribe from sub id {sub_id} failed: {exc}")
++
++        # Drop bookkeeping for every subscription just torn down, otherwise it
++        # accumulates unbounded across repeated resubscribe_to_e2_nodes() calls
++        # and a late async response for a since-forgotten id can still be
++        # looked up against a stale entry.
++        self.sub_id_to_node.clear()
++        self.subscription_responses.clear()
+ 
+     def resubscribe_to_e2_nodes(self):
+         """
+@@ -388,12 +338,13 @@ class XappNori:
+ 
+     def ric_indication_handler(self, rmrxapp: RMRXapp, summary: dict, sbuf):
+         """
+-        Handler for RIC indication messages.
++        Handler for RIC indication messages. Runs the MLB decision loop for the
++        cell that sent this indication and, if the outcome differs from the
++        cell's current CIO, replies with a RIC Control Request on the same
++        route (rmr_rts), targeting that same cell.
+         """
+-        # self.logger.info(f"Received RIC indication message with summary: {summary}.")
+ 
+         msg = summary["payload"]
+-        # self.logger.debug(f"Received payload from RIC indication message: {msg}")
+ 
+         # Decoding the E2AP PDU data
+         pdu = E2AP_PDU_Descriptions.E2AP_PDU
+@@ -435,179 +386,133 @@ class XappNori:
+             "indicationMessage": decoded_ric_indication_message,
+         }
+ 
+-        # self.logger.info(f"\n\n\n\nDecoded RIC indication data: {ric_indication_data}\n#################\n\n\n\n")
+-
+-        # Send information to InfluxDB
++        # Send information to InfluxDB (best-effort, does not affect the control loop)
+         if self.save_influx:
+-            self.send_influxdb_data(ric_indication_data)
+-
+-        if self.enable_ran_slicing:
+-            ########### Interaction with RL Environment
+-            # Observation
+-            ues_thr = self.get_thr_data(ric_indication_data)
+-            slice1_ues_thr = []
+-            slice2_ues_thr = []
+-            for ue_id, ue_thr in ues_thr:
+-                if ue_id in self.slice_ues[1]:
+-                    slice1_ues_thr.append(ue_thr)
+-                elif ue_id in self.slice_ues[2]:
+-                    slice2_ues_thr.append(ue_thr)
+-            if (len(slice1_ues_thr) + len(slice2_ues_thr)) == 0:
+-                # self.logger.warning("No UEs in the slices.")
+-                # print(f"\n\n\n\n\n#########################\n{ric_indication_data}\n#########################\n\n\n\n\n")
+-                return
+-            slice_1_avg_thr = float(np.mean(slice1_ues_thr))
+-            slice_2_avg_thr = float(np.mean(slice2_ues_thr))
+-            obs = np.array([slice_1_avg_thr, slice_2_avg_thr])
+-
+-            if self.test_mode:  # Testing
+-                action = self.algo.compute_single_action(obs, explore=False)
+-            else:  # Training
+-                action = self.client.get_action(self.eid, obs)
+-            assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-            perc_action = np.floor((action / np.sum(action)) * 100)
+-            self.env.set_obs(obs)
+-            self.obs, reward, terminated, truncated, info = self.env.step(action)
+-            if not self.test_mode:  # Training
+-                self.client.log_returns(self.eid, reward, info=info)
+-            if terminated or truncated:
+-                obs, info = self.env.reset()
+-                if not self.test_mode:  # Training
+-                    self.client.end_episode(self.eid, obs)
+-                    self.eid = self.client.start_episode(training_enabled=True)
+-            ###################################
+-
+-            # Sending the RAN slicing control message to the RIC
+-            for slice_id in range(2):
+-                sst = b"\x01" if slice_id == 1 else b"\x00"
+-                sd = b"\x00\x00\x00"
+-            slices_id = [
+-                {"sST": b"\x00", "sD": b"\x00\x00\x00"},
+-                {"sST": b"\x01", "sD": b"\x00\x00\x00"},]
+-            
+-            self.send_ran_slicing_control(
+-                slices_id, perc_action, rmrxapp, summary, sbuf
+-            )
++            try:
++                self.send_influxdb_data(ric_indication_data)
++            except Exception as exc:  # noqa: BLE001 - never let telemetry break control
++                self.logger.warning(f"Failed to write to InfluxDB: {exc}")
++
++        # ---------------- MLB decision loop ----------------
++        self.run_mlb_step(ric_indication_data, rmrxapp, sbuf)
+ 
+         rmrxapp.rmr_free(sbuf)
+ 
+-    # ------------------ HTTP HANDLERS
++    # ------------------ MLB DECISION LOOP
+ 
+-    def send_influxdb_data(self, data:dict):
+-        points = []
++    def _extract_cell_pm(self, ric_indication_data: dict) -> Tuple[str, Dict[str, object]]:
++        """
++        Returns (cellObjectID, {pmType: pmVal}) from a decoded KPM indication.
++        """
++        msg = ric_indication_data["indicationMessage"][1]
++        cell_object_id = msg.get("cellObjectID", "")
++        pm: Dict[str, object] = {}
++        for pm_info in msg.get("list-of-PM-Information", []):
++            pm_type = pm_info["pmType"][1]
++            _, pm_val = pm_info["pmVal"]
++            pm[pm_type] = pm_val
++        return cell_object_id, pm
+ 
+-        # Common tags
+-        collection_start_time = datetime.datetime.now(datetime.timezone.utc) 
++    def run_mlb_step(self, ric_indication_data: dict, rmrxapp: RMRXapp, sbuf):
++        """
++        Reads the PRB utilisation and the currently active CIO reported by the
++        cell, computes the MLB decision for this control period, and sends a
++        RIC Control Request back to the same cell only when the decision
++        differs from what is already active.
++        """
++        cell_object_id, pm = self._extract_cell_pm(ric_indication_data)
++        if not pm:
++            return  # Not a cell-level KPM indication (e.g. a CU-UP/CU-CP report)
+ 
+-        # Extract cellObjectID
+-        cell_object_id = data['indicationMessage'][1]['cellObjectID']
++        prb_used = float(pm.get("RRU.PrbUsedDl", 0) or 0)
++        prb_avail = float(pm.get("RRU.PrbAvailDl", 0) or 0)
++        load = min(1.0, prb_used / prb_avail) if prb_avail > 0 else 0.0
+ 
+-        # Cell-level PM info
+-        if 'list-of-PM-Information' in data['indicationMessage'][1]:
+-            for pm_info in data['indicationMessage'][1]['list-of-PM-Information']:
+-                pm_type = pm_info['pmType'][1]
+-                pm_val_type, pm_val = pm_info['pmVal']
+-
+-                # Create a Point
+-                p = Point("cell_metrics") \
+-                    .tag("cellObjectID", cell_object_id) \
+-                    .field(pm_type, pm_val) \
+-                    .time(collection_start_time, WritePrecision.NS)
++        cio_milli = pm.get("MLB.CioMilliDb")
++        current_cio = cio_milli / 1000.0 if cio_milli is not None else None
+ 
+-                points.append(p)
++        # Informational only: MRO owns these, this xApp never writes them.
++        hyst_milli = pm.get("MRO.HysteresisMilliDb")
++        ttt_ms = pm.get("MRO.TimeToTriggerMs")
++        current_hyst = hyst_milli / 1000.0 if hyst_milli is not None else None
++        current_ttt = ttt_ms / 1000.0 if ttt_ms is not None else None
+ 
+-        # UE-level PM info
+-        if 'list-of-matched-UEs' in data['indicationMessage'][1]:
+-            for ue in data['indicationMessage'][1]['list-of-matched-UEs']:
+-                ue_id = ue['ueId'].decode()  # ueId is a byte string
+-
+-                for pm_info in ue['list-of-PM-Information']:
+-                    pm_type = pm_info['pmType'][1]
+-                    pm_val_type, pm_val = pm_info['pmVal']
+-
+-                    # Handle valueReal tuple if needed
+-                    if pm_val_type == 'valueReal':
+-                        # pm_val[0] is matissa, pm_val[1] is base, pm_val[2] is exponent
+-                        real_value = float(pm_val[0]) * float(pm_val[1]**(-pm_val[2]))
+-                    elif isinstance(pm_val,dict) and 'servingCellMeasurements' in pm_val:
+-                        # Extract the SINR value from the nested structure
+-                        sinr_value = pm_val['servingCellMeasurements'][1][0]['measResultServingCell']['measResult']['cellResults']['resultsSSB-Cell']['sinr']
+-                        real_value = sinr_value
+-                    elif isinstance(pm_val, dict):
+-                        real_value = None
+-                    else:
+-                        real_value = pm_val
+-
+-                    if real_value is not None:
+-                        # Create a Point
+-                        p = Point("ue_metrics") \
+-                            .tag("cellObjectID", cell_object_id) \
+-                            .tag("ueId", ue_id) \
+-                            .field(pm_type, real_value) \
+-                            .time(collection_start_time, WritePrecision.NS)
+-
+-                        points.append(p)
+-        self.write_api.write(bucket=self.bucket, record=points)
+-        # self.logger.info(f"Data sent to InfluxDB: {len(points)} points")
+-
+-    def get_thr_data(self, data:dict)->list:
+-        # Extract cellObjectID
+-        cell_object_id = data['indicationMessage'][1]['cellObjectID']
+-        thr_ues = []
+-        # UE-level PM info
+-        if 'list-of-matched-UEs' in data['indicationMessage'][1]:
+-            for ue in data['indicationMessage'][1]['list-of-matched-UEs']:
+-                ue_id = ue['ueId'].decode()  # ueId is a byte string
+-                for pm_info in ue['list-of-PM-Information']:
+-                    pm_type = pm_info['pmType'][1]
+-                    pm_val_type, pm_val = pm_info['pmVal']
+-                    if pm_type == "QosFlow.PdcpPduVolumeDL_Filter.UEID":
+-                        ue_thr = (50*float(pm_val))/1000 # Mbps
+-                        thr_ues.append((ue_id, ue_thr))
+-
+-        return thr_ues
+-
+-    def send_ran_slicing_control(
+-        self, slices_id: dict, action: np.ndarray, rmrxapp: RMRXapp, summary: dict, sbuf
+-    ):
++        new_cio = load_to_cio(load)
++
++        decisions: List[Tuple[int, float]] = []
++        if current_cio is None or abs(new_cio - current_cio) > DECISION_EPSILON:
++            decisions.append((RAN_PARAM_CIO, new_cio))
++
++        if self.save_influx:
++            try:
++                self.send_mlb_influxdb_point(
++                    cell_object_id,
++                    prb_used,
++                    prb_avail,
++                    load,
++                    current_cio,
++                    new_cio,
++                    current_hyst,
++                    current_ttt,
++                )
++            except Exception as exc:  # noqa: BLE001
++                self.logger.warning(f"Failed to write MLB point to InfluxDB: {exc}")
++
++        if not decisions:
++            return
++
++        self.logger.info(
++            f"Cell {cell_object_id}: load={load:.1%} (prb {prb_used:.0f}/{prb_avail:.0f}) "
++            f"-> cio={new_cio}dB (was {current_cio})"
++        )
++
++        coded_pdu = self.build_ric_control_pdu(decisions)
++        rmrxapp.rmr_rts(sbuf, new_payload=coded_pdu, new_mtype=12040)  # RIC Control Request
++
++    def build_ric_control_pdu(self, decisions: List[Tuple[int, float]]) -> bytes:
+         """
+-        Sends a RAN slicing control message to the RIC.
++        Encodes an E2AP RIC Control Request PDU carrying an
++        E2SM-RC-ControlMessage-Format1 whose ranParameters-List holds one
++        RANParameter-Item per (parameter_id, value) decision. Values are sent
++        in milli-units (milli-dB for CIO), matching the convention decoded by
++        RicControlCallback() in nori-cmf.cc.
+         """
+-
+-        ####### Creating RIC Control Request to control PRB slice quota
+-        # Encoding RIC Control Header
++        # RIC Control Header: mandatory but not consumed by nori-cmf.cc for
++        # this parameter path, so ueId/style/action are harmless placeholders.
++        # rrmPolicyList is intentionally omitted (it is OPTIONAL and only used
++        # by the RAN-slicing control path).
+         asn1_control_header = E2SM_KPM_RC.E2SM_RC_ControlHeader
+-        rrm_policy_list = []
+-        for slice_id, rb_alloc in zip(slices_id, action):
+-            rrm_policy = {
+-                "rrmPolicy": {
+-                    "rrmPolicyMemberList": [
+-                        {
+-                            "plmnIdentity": b"\x00\x01\x02",
+-                            "sNSSAI": {
+-                                "sST": slice_id["sST"],
+-                                "sD": slice_id["sD"],
+-                            },
+-                        }
+-                    ]
+-                },
+-                "dedicatedPRBPolicyRatio": int(rb_alloc),
+-                "minPRBPolicyRatio": int(rb_alloc),
+-                "maxPRBPolicyRatio": 100,
+-            }
+-            rrm_policy_list.append(rrm_policy)
+-        ric_control_header = ('controlHeader-Format1', {
+-            "ueId":b'\x00\x01', 
+-            "ric-ControlStyle-Type": 1, 
+-            "ric-ControlAction-ID": 1, 
+-            "rrmPolicyList": rrm_policy_list,
+-        }
++        control_header = (
++            "controlHeader-Format1",
++            {
++                "ueId": b"\x00\x00",
++                "ric-ControlStyle-Type": 1,
++                "ric-ControlAction-ID": 1,
++            },
+         )
+-
+-        asn1_control_header.set_val(ric_control_header)
++        asn1_control_header.set_val(control_header)
+         coded_control_header = asn1_control_header.to_aper()
+ 
+-        # Encoding RIC Control Request
++        # RIC Control Message: one RANParameter-Item per decision.
++        ran_parameters = [
++            {
++                "ranParameterItem-ID": param_id,
++                "ranParameterItem-valueType": (
++                    "ranParameter-Element",
++                    {
++                        "keyFlag": False,
++                        "ranParameter-Value": ("valueInt", int(round(value * 1000.0))),
++                    },
++                ),
++            }
++            for param_id, value in decisions
++        ]
++        asn1_control_message = E2SM_KPM_RC.E2SM_RC_ControlMessage
++        asn1_control_message.set_val(
++            ("controlMessage-Format1", {"ranParameters-List": ran_parameters})
++        )
++        coded_control_message = asn1_control_message.to_aper()
++
+         asn1_pdu = E2AP_PDU_Descriptions.E2AP_PDU
+         ric_request_msg = (
+             "initiatingMessage",
+@@ -623,13 +528,16 @@ class XappNori:
+                                 "criticality": "reject",
+                                 "value": (
+                                     "RICrequestID",
+-                                    {"ricRequestorID": 1003, "ricInstanceID": 1},
++                                    {
++                                        "ricRequestorID": MLB_REQUESTOR_ID,
++                                        "ricInstanceID": 1,
++                                    },
+                                 ),
+                             },
+                             {
+                                 "id": 5,
+                                 "criticality": "reject",
+-                                "value": ("RANfunctionID", 200),
++                                "value": ("RANfunctionID", 300),
+                             },
+                             {
+                                 "id": 20,
+@@ -644,7 +552,7 @@ class XappNori:
+                             {
+                                 "id": 23,
+                                 "criticality": "reject",
+-                                "value": ("RICcontrolMessage", b"\x00\x01"),
++                                "value": ("RICcontrolMessage", coded_control_message),
+                             },
+                         ]
+                     },
+@@ -652,24 +560,70 @@ class XappNori:
+             },
+         )
+         asn1_pdu.set_val(ric_request_msg)
+-        coded_pdu = asn1_pdu.to_aper()
++        return asn1_pdu.to_aper()
++
++    # ------------------ INFLUXDB
+ 
+-        # Sending the RIC Control Request
+-        rmrxapp.rmr_rts(
+-            sbuf, new_payload=coded_pdu, new_mtype=12040
+-        )  # 12040 = RIC Control Request
++    def send_influxdb_data(self, data: dict):
++        points = []
+ 
+-        # # Decoding RIC Control Request
+-        # asn1_pdu.from_aper(coded_pdu)
+-        # decoded_pdu = asn1_pdu.get_val()
+-        # self.logger.info(f"\n\n\n################\nDecoded PDU: {decoded_pdu}")
++        # Common tags
++        collection_start_time = datetime.datetime.now(datetime.timezone.utc)
+ 
+-        # # Decoding RIC Control Header
+-        # assert decoded_pdu is not None, "Decoded PDU is None"
+-        # coded_control = decoded_pdu[1]["value"][1]["protocolIEs"][3]["value"][1]
+-        # asn1_control_header.from_aper(coded_control)
+-        # decoded_control = asn1_control_header.get_val()
+-        # self.logger.info(f"\n\n\n################\nDecoded Control Header: {decoded_control}")
++        # Extract cellObjectID
++        cell_object_id = data["indicationMessage"][1]["cellObjectID"]
++
++        # Cell-level PM info
++        if "list-of-PM-Information" in data["indicationMessage"][1]:
++            for pm_info in data["indicationMessage"][1]["list-of-PM-Information"]:
++                pm_type = pm_info["pmType"][1]
++                pm_val_type, pm_val = pm_info["pmVal"]
++
++                p = (
++                    Point("cell_metrics")
++                    .tag("cellObjectID", cell_object_id)
++                    .field(pm_type, pm_val)
++                    .time(collection_start_time, WritePrecision.NS)
++                )
++                points.append(p)
++
++        if points:
++            self.write_api.write(bucket=self.bucket, record=points)
++
++    def send_mlb_influxdb_point(
++        self,
++        cell_object_id: str,
++        prb_used: float,
++        prb_avail: float,
++        load: float,
++        current_cio: Optional[float],
++        new_cio: float,
++        current_hyst: Optional[float],
++        current_ttt: Optional[float],
++    ):
++        """
++        Records one MLB decision-loop sample per cell per indication, so the
++        control loop can be inspected on Grafana independently of the raw KPM
++        dump written by send_influxdb_data().
++        """
++        p = (
++            Point("mlb_control")
++            .tag("cellObjectID", cell_object_id)
++            .field("prb_used", prb_used)
++            .field("prb_avail", prb_avail)
++            .field("load", load)
++            .field("new_cio_db", new_cio)
++        )
++        if current_cio is not None:
++            p = p.field("current_cio_db", current_cio)
++        if current_hyst is not None:
++            p = p.field("current_hysteresis_db", current_hyst)
++        if current_ttt is not None:
++            p = p.field("current_ttt_s", current_ttt)
++        p = p.time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.NS)
++        self.write_api.write(bucket=self.bucket, record=[p])
++
++    # ------------------ HTTP HANDLERS
+ 
+     def resubscribe_handler(self, name: str, path: str, data: bytes, ctype: str):
+         """
+@@ -678,9 +632,17 @@ class XappNori:
+         self.logger.info(
+             "Received GET /ric/v1/resubscribe request, resubscribing to E2 Nodes"
+         )
+-        self.resubscribe_to_e2_nodes()
++        # Dispatched in a background thread, the same way the initial
++        # subscribe_to_e2_nodes() call is in start(): with many stale/
++        # unresponsive E2 nodes registered at the RIC, a full unsubscribe+
++        # subscribe pass can take well over a minute even with a bounded
++        # per-request timeout, which would otherwise stall this very HTTP
++        # handler thread long enough for the liveness probe to time out and
++        # get the pod killed.
++        Thread(target=self.resubscribe_to_e2_nodes, daemon=True).start()
+         response = xapp_rest.initResponse(
+-            status=200, response="xApp ACKs resubscription request"  # Status = 200 OK
++            status=200,  # Status = 200 OK
++            response="xApp ACKs resubscription request, resubscribing in the background",
+         )  # Initiating HTTP response
+         return response
+ 
+@@ -696,56 +658,54 @@ class XappNori:
+                 sub_resp
+             )
+         )
+-        nodeb = self.sub_id_to_node[sub_resp["SubscriptionId"]]
+-        self.subscription_responses[nodeb]["SubscriptionInstances"] = sub_resp[
+-            "SubscriptionInstances"
+-        ]
++        # submgr retries/resends this callback (e.g. while an E2 node is slow
++        # to answer); a retry can arrive after resubscribe_to_e2_nodes() has
++        # already rebuilt sub_id_to_node, so the SubscriptionId may no longer
++        # be known here. Still ACK it (submgr would otherwise keep retrying
++        # forever), just skip recording it.
++        nodeb = self.sub_id_to_node.get(sub_resp["SubscriptionId"])
++        if nodeb is None:
++            self.logger.warning(
++                f"Subscription response for unknown/stale SubscriptionId {sub_resp['SubscriptionId']}, ignoring."
++            )
++        else:
++            self.subscription_responses[nodeb]["SubscriptionInstances"] = sub_resp[
++                "SubscriptionInstances"
++            ]
+         response = xapp_rest.initResponse(
+             status=200,  # Status = 200 OK
+             response="xApp ACKs the subscription response",
+         )  # Initiating HTTP response
+-
+-        # Resubscribing if RtMgr did not create xApp routes
+-        # if sub_resp["SubscriptionInstances"] is not None:
+-        #    for sub_inst in sub_resp["SubscriptionInstances"]:
+-        #        if "CREATE routeinfo" in sub_inst["ErrorCause"]:
+-        #            self.logger.error("RtMgr did not creat a route to the xApp yet, resubscribing to E2 Nodes...")
+-        #            Thread(target=self.resubscribe_to_e2_nodes).start()
+         return response
+ 
+     def config_handler(self, name: str, path: str, data: bytes, ctype: str):
+         """
+         Handler for the HTTP GET /ric/v1/config request.
+         """
+-        # self.logger.info("Received GET /ric/v1/config request with content type {}.".format(ctype))
+         response = xapp_rest.initResponse(
+             status=200, response="Config data"  # Status = 200 OK
+         )  # Initiating HTTP response
+         response["payload"] = json.dumps(
+             self._rmrxapp._config_data
+         )  # Payload = the xApp config-file
+-        # self.logger.debug("Config handler response: {}.".format(response))
+         return response
+ 
+     def liveness_handler(self, name: str, path: str, data: bytes, ctype: str):
+         """
+         Handler for the HTTP GET /ric/v1/health/alive request.
+         """
+-        # self.logger.info("Received GET /ric/v1/health/alive request with content type {}.".format(ctype))
+         response = xapp_rest.initResponse(
+             status=200, response="Liveness"  # Status = 200 OK
+         )  # Initiating HTTP response
+         response["payload"] = json.dumps(
+             {"status": "Healthy"}
+         )  # Payload = status: Healthy
+-        # self.logger.debug("Liveness handler response: {}.".format(response))
+         return response
+ 
+     def readiness_handler(self, name: str, path: str, data: bytes, ctype: str):
+         """
+         Handler for the HTTP GET /ric/v1/health/ready request.
+         """
+-        # self.logger.info("Received GET /ric/v1/health/ready request with content type {}.".format(ctype))
+         if self._ready:
+             response = xapp_rest.initResponse(
+                 status=200, response="Readiness"  # Status = 200 OK
+@@ -758,7 +718,6 @@ class XappNori:
+                 status=503, response="Readiness"  # Status = 503 Service Unavailable
+             )
+             response["payload"] = json.dumps({"status": "Not ready"})
+-        # self.logger.debug("Readiness handler response: {}.".format(response))
+         return response
+ 
+     # ------------------ SUBSCRIPTION REQUEST JSON
+@@ -770,7 +729,7 @@ class XappNori:
+         return {
+             "SubscriptionId": "",
+             "ClientEndpoint": {
+-                "Host": "service-ricxapp-xappnori-http.ricxapp",
++                "Host": "service-ricxapp-xappmlb-http.ricxapp",
+                 "HTTPPort": 8080,
+                 "RMRPort": 4560,
+             },
+diff --git a/src/env.py b/src/env.py
+deleted file mode 100644
+index 1787716..0000000
+--- a/src/env.py
++++ /dev/null
+@@ -1,246 +0,0 @@
+-import argparse
+-from pathlib import Path
+-
+-import numpy as np
+-from gymnasium import Env, spaces
+-from ray.rllib.algorithms.algorithm import Algorithm
+-from ray.rllib.env.policy_client import PolicyClient
+-import argparse
+-import os
+-from math import inf
+-from pathlib import Path
+-import ray
+-from ray import air, tune
+-from ray.rllib.algorithms.ppo import PPO
+-from ray.rllib.env.policy_server_input import PolicyServerInput
+-from ray.tune.registry import get_trainable_cls
+-import threading
+-from time import sleep
+-
+-
+-class MobNet(Env):
+-    def __init__(self, env_config=None, debug=False):
+-        super(MobNet, self).__init__()
+-        self.steps_per_episode = 1000
+-        self.curr_step = 0
+-        self.curr_ep = 0
+-        self.max_number_ep = 10
+-        self.action_space = spaces.Box(low=0.1, high=1, shape=(2,))
+-        self.observation_space = spaces.Box(
+-            low=0, high=np.inf, shape=(2,), dtype=np.float32
+-        )
+-
+-        self.slice_req = np.array([4, 1])
+-        self.debug = debug
+-
+-    def step(self, action):
+-        perc_action = np.floor((action / np.sum(action)) * 100)
+-        reward = self.calculate_reward(self.obs)
+-        terminated, truncated = False, False
+-        if self.debug:
+-            print(
+-                f"Episode: {self.curr_ep}, Step: {self.curr_step}, Reward: {reward} Action: {perc_action}, Obs: {self.obs}, Req: {self.slice_req}"
+-            )
+-        self.curr_step += 1
+-        if self.curr_step > self.steps_per_episode:
+-            terminated = truncated = True
+-            self.curr_ep += 1
+-
+-        return self.obs, reward, terminated, truncated, {}
+-
+-    def reset(self, seed=None, options=None):
+-        self.curr_step = 0
+-        if self.curr_ep > self.max_number_ep:
+-            self.curr_ep = 0
+-        return np.array([0, 0]), {}
+-
+-    def set_obs(self, obs):
+-        self.obs = obs
+-
+-    def calculate_reward(
+-        self,
+-        obs: np.ndarray,
+-    ) -> float:
+-        reward = 0.0
+-        under_thr = obs < self.slice_req
+-        if under_thr.any():
+-            reward -= np.mean(
+-                (self.slice_req[under_thr] - obs[under_thr]) / self.slice_req[under_thr]
+-            )
+-        assert isinstance(reward, float)
+-        return reward
+-
+-
+-def client_rl(test_mode: bool = False):
+-    SERVER_ADDRESS = "localhost"
+-    RAY_STORAGE = "./ray_results/"
+-    AGENT_NAME = "ppo"
+-    SERVER_BASE_PORT = 9900
+-    env = MobNet()
+-
+-    # Start a new episode.
+-    obs, info = env.reset()
+-
+-    if test_mode:  # Testing
+-        ray_storage = str(Path(RAY_STORAGE).resolve())
+-        analysis = tune.ExperimentAnalysis(f"{ray_storage}/{AGENT_NAME}/")
+-        assert analysis.trials is not None, "Analysis trial is None"
+-        last_checkpoint = analysis.get_last_checkpoint(analysis.trials[0])
+-        assert last_checkpoint is not None, "Last checkpoint is None"
+-        algo = Algorithm.from_checkpoint(last_checkpoint)
+-        while True:
+-            try:
+-                action = algo.compute_single_action(obs, explore=False)
+-                assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-                obs, reward, terminated, truncated, info = env.step(action)
+-                if terminated or truncated:
+-                    _, _ = env.reset()
+-            except KeyboardInterrupt:
+-                break
+-    else:  # Training
+-        client = PolicyClient(
+-            f"http://{SERVER_ADDRESS}:{SERVER_BASE_PORT}",
+-            inference_mode="local",
+-        )
+-        eid = client.start_episode(training_enabled=True)
+-        while True:
+-            try:
+-                action = client.get_action(eid, obs)
+-
+-                assert isinstance(action, np.ndarray), "Action must be a numpy array."
+-                obs, reward, terminated, truncated, info = env.step(action)
+-
+-                # Log next-obs, rewards, and infos.
+-                client.log_returns(eid, reward, info=info)
+-
+-                # Reset the episode if done.
+-                if terminated or truncated:
+-                    client.end_episode(eid, obs)
+-                    obs, info = env.reset()
+-                    eid = client.start_episode(training_enabled=True)
+-            except KeyboardInterrupt:
+-                break
+-
+-
+-def server_rl():
+-    SERVER_ADDRESS = "localhost"
+-    SERVER_BASE_PORT = 9900
+-    RAY_STORAGE = "./ray_results/"
+-    AGENT_NAME = "oai_ppo"
+-    EPISODES_TOTAL = 100000
+-    DEBUG_MODE = False
+-    env = MobNet()
+-    ray_storage = str(Path(RAY_STORAGE).resolve())
+-    ray.init(local_mode=DEBUG_MODE)
+-
+-    def _input(ioctx):
+-        if ioctx.worker_index > 0 or ioctx.worker.num_workers == 0:
+-            return PolicyServerInput(
+-                ioctx,
+-                SERVER_ADDRESS,
+-                SERVER_BASE_PORT
+-                + ioctx.worker_index
+-                - (1 if ioctx.worker_index > 0 else 0),
+-            )
+-        else:
+-            return None
+-
+-    config = (
+-        get_trainable_cls("PPO")
+-        .get_default_config()
+-        .environment(
+-            env=None,
+-            observation_space=env.observation_space,
+-            action_space=env.action_space,
+-            is_atari=False,
+-        )
+-        .framework("torch")
+-        .offline_data(input_=_input)
+-        .rollouts(
+-            num_rollout_workers=0,
+-            enable_connectors=False,
+-        )
+-        .evaluation(off_policy_estimation_methods={})
+-        .debugging(log_level="INFO")
+-        .training(
+-            lr=0.0003,  # SB3 LR
+-            train_batch_size=256,  # SB3 n_steps
+-            sgd_minibatch_size=64,  # type: ignore SB3 batch_size
+-            num_sgd_iter=10,  # type: ignore SB3 n_epochs
+-            gamma=0.99,  # SB3 gamma
+-            lambda_=0.95,  # type: ignore # SB3 gae_lambda
+-            clip_param=0.2,  # type: ignore SB3 clip_range,
+-            vf_clip_param=np.inf,  # type: ignore SB3 equivalent to clip_range_vf=None
+-            use_gae=True,  # type: ignore SB3 normalize_advantage
+-            entropy_coeff=0.01,  # type: ignore SB3 ent_coef
+-            vf_loss_coeff=0.5,  # type: ignore SB3 vf_coef
+-            grad_clip=0.5,  # SB3 max_grad_norm TODO
+-            # kl_target=0.00001,  # SB3 target_kl
+-        )
+-        # .rl_module(_enable_rl_module_api=False)
+-        # .experimental(_enable_new_api_stack=False)
+-    )
+-
+-    config["model"]["fcnet_hiddens"] = [
+-        64,
+-        64,
+-    ]  # Set neural network size
+-
+-    config.experimental()
+-
+-    stop = {
+-        "episodes_total": EPISODES_TOTAL,
+-    }
+-
+-    # Restore the agent training in case of interruption or starts a new training
+-    if tune.Tuner.can_restore(f"{ray_storage}/{AGENT_NAME}/"):
+-        tuner = tune.Tuner.restore(
+-            f"{ray_storage}/{AGENT_NAME}/", trainable=PPO, param_space=config
+-        )
+-        results = tuner.fit()
+-    else:
+-        results = tune.Tuner(
+-            "PPO",
+-            param_space=config,
+-            run_config=air.RunConfig(
+-                stop=stop,
+-                verbose=2,
+-                storage_path=ray_storage,
+-                name=AGENT_NAME,
+-                checkpoint_config=air.CheckpointConfig(
+-                    checkpoint_frequency=1,
+-                    checkpoint_at_end=True,
+-                ),
+-            ),
+-        ).fit()
+-
+-
+-# Example usage
+-if __name__ == "__main__":
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument(
+-        "--client",
+-        action="store_true",
+-    )
+-    parser.add_argument(
+-        "--test",
+-        action="store_true",
+-    )
+-    parser.add_argument(
+-        "--server",
+-        action="store_true",
+-    )
+-    args = parser.parse_args()
+-    if args.client:
+-        client_rl(test_mode=args.test)
+-    elif args.server:
+-        server_rl()
+-    else:
+-        server_thread = threading.Thread(target=server_rl)
+-        server_thread.start()
+-        sleep(10)
+-        client_rl()
+-        # Reverse
+-        # client_thread = threading.Thread(target=client_rl)
+-        # client_thread.start()
+-        # server_rl()
+diff --git a/src/main.py b/src/main.py
+index 8d6c580..7883609 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -1,11 +1,11 @@
+ # Imports from local files
+-from .custom_xapp import XappNori
++from .custom_xapp import XappMlb
+ 
+ def launchXapp():
+     """
+     Entrypoint called in the xApp Dockerfile.
+     """
+-    xapp_instance = XappNori() # Instantiating our custom xApp 
++    xapp_instance = XappMlb() # Instantiating our custom xApp
+     xapp_instance.start() # Starting our custom xApp in threaded mode
+ 
+ if __name__ == "__main__":
+diff --git a/src/requirements.txt b/src/requirements.txt
+index 2db265d..8c03df7 100644
+--- a/src/requirements.txt
++++ b/src/requirements.txt
+@@ -1,100 +1 @@
+-absl-py==2.2.2
+-aiosignal==1.3.2
+-async-timeout==5.0.1
+-attrs==25.3.0
+-cachetools==5.5.2
+-certifi==2025.1.31
+-charset-normalizer==3.4.1
+-click==8.1.8
+-cloudpickle==3.1.1
+-dm-tree==0.1.9
+-Farama-Notifications==0.0.4
+-filelock==3.18.0
+-frozenlist==1.6.0
+-fsspec==2025.3.2
+-google-api-core==2.24.2
+-google-api-python-client==2.167.0
+-google-auth==2.39.0
+-google-auth-httplib2==0.2.0
+-googleapis-common-protos==1.70.0
+-grpcio==1.71.0
+-gymnasium==0.28.1
+-hiredis==2.0.0
+-httplib2==0.22.0
+-idna==3.10
+-imageio==2.37.0
+ influxdb-client==1.48.0
+-inotify==0.2.10
+-inotify-simple==1.3.5
+-jax-jumpy==1.0.0
+-Jinja2==3.1.6
+-jsonschema==4.23.0
+-jsonschema-specifications==2024.10.1
+-lazy_loader==0.4
+-logger==1.4
+-lz4==4.4.4
+-Markdown==3.8
+-markdown-it-py==3.0.0
+-MarkupSafe==3.0.2
+-mdclogpy==1.1.4
+-mdurl==0.1.2
+-mpmath==1.3.0
+-msgpack==1.1.0
+-networkx==3.4.2
+-nose==1.3.7
+-numpy==1.26.4
+-nvidia-cublas-cu12==12.4.5.8
+-nvidia-cuda-cupti-cu12==12.4.127
+-nvidia-cuda-nvrtc-cu12==12.4.127
+-nvidia-cuda-runtime-cu12==12.4.127
+-nvidia-cudnn-cu12==9.1.0.70
+-nvidia-cufft-cu12==11.2.1.3
+-nvidia-curand-cu12==10.3.5.147
+-nvidia-cusolver-cu12==11.6.1.9
+-nvidia-cusparse-cu12==12.3.1.170
+-nvidia-cusparselt-cu12==0.6.2
+-nvidia-nccl-cu12==2.21.5
+-nvidia-nvjitlink-cu12==12.4.127
+-nvidia-nvtx-cu12==12.4.127
+-packaging==25.0
+-pandas==2.2.3
+-pillow==11.2.1
+-proto-plus==1.26.1
+-protobuf==3.20.3
+-pyarrow==19.0.1
+-pyasn1==0.6.1
+-pyasn1_modules==0.4.2
+-pycrate==0.7.8
+-Pygments==2.19.1
+-pyparsing==3.2.3
+-python-dateutil==2.9.0.post0
+-pytz==2025.2
+-PyYAML==6.0.2
+-ray==2.9.3
+-reactivex==4.0.4
+-redis==4.3.6
+-referencing==0.36.2
+-requests==2.32.3
+-rich==14.0.0
+-ricsdl==3.1.3
+-rpds-py==0.24.0
+-rsa==4.9.1
+-scikit-image==0.25.2
+-scipy==1.15.2
+-shellingham==1.5.4
+-six==1.17.0
+-sympy==1.13.1
+-tensorboard==2.19.0
+-tensorboard-data-server==0.7.2
+-tensorboardX==2.6.2.2
+-tifffile==2025.3.30
+-torch==2.6.0
+-torch-tb-profiler==0.4.3
+-triton==3.2.0
+-typer==0.15.2
+-typing_extensions==4.13.2
+-tzdata==2025.2
+-uritemplate==4.1.1
+-urllib3==2.4.0
+-Werkzeug==3.1.3
+-wrapt==1.17.2
+\ No newline at end of file
+diff --git a/update_xapp.sh b/update_xapp.sh
+old mode 100644
+new mode 100755
+index ad490f6..2255bde
+--- a/update_xapp.sh
++++ b/update_xapp.sh
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ 
+ namespace="ricxapp"
+-xapp_name="xappnori"
++xapp_name="xappmlb"
+ 
+ echo "namespace=$namespace"
+ echo "xapp_name=$xapp_name"
